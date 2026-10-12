@@ -85,6 +85,32 @@ pub fn request_body(profile: &Profile, request: &Request, stream: bool) -> Resul
     Ok(body)
 }
 
+/// Shrinks plain-text history until the encoded body fits. Provider wire history is not accepted here.
+pub fn fit_plain_messages(
+    profile: &Profile,
+    system: &str,
+    mut messages: Vec<Message>,
+) -> Result<(Vec<Message>, usize), AiError> {
+    let mut omitted = 0;
+    loop {
+        let request = Request {
+            system: system.to_owned(),
+            messages: messages.clone(),
+            ..Default::default()
+        };
+        match request_body(profile, &request, true) {
+            Ok(_) => return Ok((messages, omitted)),
+            Err(AiError::Limit) => {
+                if !crate::conversation::omit_oldest_turn(&mut messages) {
+                    return Err(AiError::Limit);
+                }
+                omitted += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[derive(Default)]
 struct PendingCall {
     id: String,
@@ -655,5 +681,39 @@ mod tests {
             ),
             Err(AiError::Limit)
         );
+    }
+    #[test]
+    fn plain_history_trims_and_wire_history_is_not_rewritten() {
+        let mut profile = profile("local");
+        profile.limits.input_bytes = 1024;
+        let (messages, omitted) = fit_plain_messages(
+            &profile,
+            "system",
+            vec![
+                Message {
+                    role: "user".into(),
+                    content: "old".repeat(2000),
+                },
+                Message {
+                    role: "user".into(),
+                    content: "now".into(),
+                },
+            ],
+        )
+        .unwrap();
+        assert!(omitted >= 1);
+        assert_eq!(messages.last().unwrap().content, "now");
+        let wire = vec![json!({"role":"user","content":"x".repeat(2000)})];
+        let request = Request {
+            system: "system".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            wire_history: wire.clone(),
+            ..Default::default()
+        };
+        assert_eq!(request_body(&profile, &request, true), Err(AiError::Limit));
+        assert_eq!(request.wire_history, wire);
     }
 }

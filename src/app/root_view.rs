@@ -5631,11 +5631,7 @@ pub(super) fn preferences_panel_view(
 ) -> Div {
     let palette = app.palette();
     let active_tab = app.preferences_tab;
-    let panel_width = if active_tab == PreferencesTab::Shortcuts {
-        720.
-    } else {
-        640.
-    };
+    let panel_width = 800.;
 
     div()
         .absolute()
@@ -5950,13 +5946,15 @@ fn preferences_tab_strip(
     app: &MarkionApp,
     palette: ThemePalette,
     cx: &mut Context<MarkionApp>,
-) -> Div {
+) -> Stateful<Div> {
     div()
+        .id("preferences-tab-strip")
         .px_4()
         .pb_3()
         .flex_none()
         .flex()
-        .flex_wrap()
+        .flex_nowrap()
+        .overflow_x_scroll()
         .items_center()
         .gap_1()
         .child(preferences_tab_button(
@@ -6532,7 +6530,8 @@ fn preferences_tab_button(
     };
 
     div()
-        .min_w(px(112.))
+        .flex_shrink_0()
+        .whitespace_nowrap()
         .px_3()
         .py_1()
         .rounded_md()

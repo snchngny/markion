@@ -3908,10 +3908,22 @@ fn preferences_panel_renders_and_wires_the_export_tab() {
 
     let strip = source
         .split_once("fn preferences_tab_strip")
-        .and_then(|(_, rest)| rest.split_once("fn preferences_tab_button"))
+        .and_then(|(_, rest)| rest.split_once("fn preferences_images_body"))
         .map(|(body, _)| body)
         .expect("Preferences tab strip");
     assert!(strip.contains("Msg::PrefPanelTabExport"));
+    assert!(strip.contains(".flex_nowrap()"));
+    assert!(strip.contains(".overflow_x_scroll()"));
+    assert!(!strip.contains(".flex_wrap()"));
+    let tab_button = source
+        .split_once("fn preferences_tab_button")
+        .and_then(|(_, rest)| rest.split_once("fn preferences_appearance_body"))
+        .map(|(body, _)| body)
+        .expect("preferences tab button");
+    assert!(!tab_button.contains("min_w(px(112.))"));
+    assert!(tab_button.contains(".whitespace_nowrap()"));
+    assert!(strip.contains("PreferencesTab::General"));
+    assert!(strip.contains("PreferencesTab::Ai"));
 
     let export_body = source
         .split_once("fn preferences_export_body")
@@ -4101,7 +4113,7 @@ fn preferences_language_picker_contains_variable_width_labels() {
         .map(|(body, _)| body)
         .expect("Preferences language section");
 
-    assert!(panel.contains("720.\n    } else {\n        640."));
+    assert!(panel.contains("let panel_width = 800.;"));
     assert!(panel.contains(".w_full()"));
     assert!(panel.contains(".max_w(px(panel_width))"));
     assert!(language_section.contains(".flex_wrap()"));

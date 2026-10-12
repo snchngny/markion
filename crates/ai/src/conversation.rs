@@ -71,7 +71,7 @@ impl Conversation {
             }
         }
     }
-    pub fn context(&self, brief: &str, budget: usize) -> Result<Vec<Message>, AiError> {
+    pub fn context(&self, brief: &str, budget: usize) -> Result<PreparedContext, AiError> {
         let mut messages = self
             .messages
             .iter()
@@ -92,15 +92,17 @@ impl Conversation {
             role: "user".into(),
             content,
         });
-        if messages
-            .iter()
-            .map(|m| m.content.len() + m.role.len())
-            .sum::<usize>()
-            > budget
-        {
-            return Err(AiError::Limit);
+        let mut omitted_turns = 0;
+        while message_cost(&messages) > budget {
+            if !omit_oldest_turn(&mut messages) {
+                return Err(AiError::Limit);
+            }
+            omitted_turns += 1;
         }
-        Ok(messages)
+        Ok(PreparedContext {
+            messages,
+            omitted_turns,
+        })
     }
     pub fn begin(
         &mut self,
@@ -192,6 +194,30 @@ impl Conversation {
         conversation
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedContext {
+    pub messages: Vec<Message>,
+    pub omitted_turns: usize,
+}
+pub fn message_cost(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|message| message.content.len() + message.role.len())
+        .sum()
+}
+/// Drops the oldest complete turn. A leading user/assistant pair counts as one turn.
+/// The newest message, the current turn, is never removed.
+pub fn omit_oldest_turn(messages: &mut Vec<Message>) -> bool {
+    if messages.len() <= 1 {
+        return false;
+    }
+    let pair = messages.len() > 2 && messages[0].role == "user" && messages[1].role == "assistant";
+    messages.remove(0);
+    if pair {
+        messages.remove(0);
+    }
+    true
+}
 pub const HISTORY_COUNT: usize = 20;
 pub const HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub fn bounded_history(mut entries: Vec<HistoryEntry>) -> Result<Vec<HistoryEntry>, AiError> {
@@ -229,7 +255,10 @@ mod tests {
     #[test]
     fn explicit_context_and_identity_gate() {
         let mut c = Conversation::new(1);
-        assert_eq!(c.context("hello", 100).unwrap()[0].content, "hello");
+        assert_eq!(
+            c.context("hello", 100).unwrap().messages[0].content,
+            "hello"
+        );
         c.attachments.push(Attachment {
             identity: None,
             document: None,
@@ -239,13 +268,14 @@ mod tests {
             text: "中文".into(),
         });
         assert!(c.context("", 2).is_err());
+        assert_eq!(c.attachments[0].text, "中文");
         let stamp = RequestStamp {
             conversation: 1,
             request: 1,
             configuration: 1,
             workspace: 1,
         };
-        let context = c.context("rewrite", 1024).unwrap();
+        let context = c.context("rewrite", 1024).unwrap().messages;
         c.begin(stamp, "rewrite".into(), context).unwrap();
         assert!(!c.event(
             RequestStamp {
@@ -307,5 +337,33 @@ mod tests {
             .collect();
         assert_eq!(bounded_history(entries).unwrap().len(), 20);
         assert_eq!(decode_history(b"[{\"bad\":1}]").unwrap().len(), 0);
+    }
+    #[test]
+    fn older_turns_are_omitted_and_the_current_turn_is_not_clipped() {
+        let mut c = Conversation::new(1);
+        c.messages.push(ChatMessage {
+            role: "user".into(),
+            text: "old-user".into(),
+            complete: true,
+        });
+        c.messages.push(ChatMessage {
+            role: "assistant".into(),
+            text: "old-assistant".into(),
+            complete: true,
+        });
+        let prepared = c.context("now", 20).unwrap();
+        assert_eq!(prepared.omitted_turns, 1);
+        assert_eq!(prepared.messages.len(), 1);
+        assert_eq!(prepared.messages[0].content, "now");
+        c.attachments.push(Attachment {
+            identity: None,
+            document: None,
+            label: "note.md".into(),
+            path: None,
+            range: None,
+            text: "x".repeat(80),
+        });
+        assert!(c.context("now", 40).is_err());
+        assert_eq!(c.attachments[0].text.len(), 80);
     }
 }

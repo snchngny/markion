@@ -24,7 +24,10 @@ actions!(
         InputNewline
     ]
 );
-pub(super) struct Submit;
+pub(super) enum InputEvent {
+    Submit,
+    OverBudget,
+}
 fn is_text_key(event: &KeyDownEvent) -> bool {
     let modifiers = event.keystroke.modifiers;
     event.prefer_character_input
@@ -36,6 +39,7 @@ pub(super) struct AiInput {
     pub field: SearchFieldState,
     pub multiline: bool,
     pub masked: bool,
+    pub max_bytes: usize,
     pub(super) undo: Vec<SearchFieldState>,
     redo: Vec<SearchFieldState>,
     composition: Option<SearchFieldState>,
@@ -46,7 +50,7 @@ pub(super) struct AiInput {
     selecting: bool,
     scroll: ScrollHandle,
 }
-impl EventEmitter<Submit> for AiInput {}
+impl EventEmitter<InputEvent> for AiInput {}
 impl Focusable for AiInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -64,6 +68,7 @@ impl AiInput {
             field: SearchFieldState::new(text),
             multiline,
             masked,
+            max_bytes: 64 * 1024,
             undo: Vec::new(),
             redo: Vec::new(),
             composition: None,
@@ -77,6 +82,14 @@ impl AiInput {
     }
     pub fn text(&self) -> &str {
         &self.field.buffer
+    }
+    pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        self.max_bytes = max_bytes;
+    }
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        self.masked = masked;
+        self.layout_key = None;
+        cx.notify();
     }
     pub fn set(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.field.set_text(text);
@@ -111,7 +124,8 @@ impl AiInput {
         } else {
             text.replace(['\r', '\n'], " ")
         };
-        if self.field.buffer.len() - range.len() + text.len() > 64 * 1024 {
+        if self.field.buffer.len() - range.len() + text.len() > self.max_bytes {
+            cx.emit(InputEvent::OverBudget);
             return;
         }
         if marked {
@@ -658,7 +672,7 @@ impl Render for AiInput {
             }))
             .on_action(cx.listener(|s, _: &InputEnter, _, cx| {
                 if s.field.marked_range.is_none() && s.multiline {
-                    cx.emit(Submit);
+                    cx.emit(InputEvent::Submit);
                 }
                 cx.stop_propagation();
             }))

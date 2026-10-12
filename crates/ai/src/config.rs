@@ -41,6 +41,21 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            input_bytes: 512 * 1024,
+            output_bytes: 512 * 1024,
+            tool_bytes: 64 * 1024,
+            max_tools: 12,
+            max_operations: 20,
+            timeout_secs: 300,
+            idle_secs: 120,
+            output_tokens: 8192,
+        }
+    }
+}
+impl Limits {
+    /// Factory tuple shipped before the 512 KiB context default.
+    pub fn previous_factory() -> Self {
+        Self {
             input_bytes: 64 * 1024,
             output_bytes: 128 * 1024,
             tool_bytes: 64 * 1024,
@@ -51,18 +66,16 @@ impl Default for Limits {
             output_tokens: 4096,
         }
     }
-}
-impl Limits {
     pub fn validate(&self) -> Result<(), AiError> {
-        if !(1024..=1024 * 1024).contains(&self.input_bytes)
-            || !(1024..=1024 * 1024).contains(&self.output_bytes)
+        if !(1024..=8 * 1024 * 1024).contains(&self.input_bytes)
+            || !(1024..=4 * 1024 * 1024).contains(&self.output_bytes)
             || !(256..=256 * 1024).contains(&self.tool_bytes)
             || !(1..=64).contains(&self.max_tools)
             || !(1..=100).contains(&self.max_operations)
             || !(5..=600).contains(&self.timeout_secs)
-            || !(1..=120).contains(&self.idle_secs)
+            || !(1..=300).contains(&self.idle_secs)
             || self.idle_secs > self.timeout_secs
-            || !(128..=32768).contains(&self.output_tokens)
+            || !(128..=131_072).contains(&self.output_tokens)
         {
             Err(AiError::InvalidProfile)
         } else {
@@ -91,14 +104,79 @@ impl Default for Profile {
     }
 }
 impl Profile {
-    pub const PRESETS: [&'static str; 5] = ["openai", "anthropic", "deepseek", "local", "custom"];
+    pub const PRESETS: [&'static str; 12] = [
+        "openai",
+        "anthropic",
+        "deepseek",
+        "gemini",
+        "xai",
+        "mistral",
+        "moonshot",
+        "qwen",
+        "zhipu",
+        "openrouter",
+        "local",
+        "custom",
+    ];
     pub fn preset(provider: &str, id: &str) -> Self {
-        let (name, protocol, endpoint) = match provider {
-            "openai" => ("OpenAI", "responses", "https://api.openai.com/v1"),
-            "anthropic" => ("Anthropic", "anthropic", "https://api.anthropic.com/v1"),
-            "deepseek" => ("DeepSeek", "chat", "https://api.deepseek.com/v1"),
-            "local" => ("Local / Ollama", "chat", "http://localhost:11434/v1"),
-            _ => ("Custom", "chat", ""),
+        let (name, protocol, endpoint, model) = match provider {
+            "openai" => (
+                "OpenAI",
+                "responses",
+                "https://api.openai.com/v1",
+                "gpt-5.2",
+            ),
+            "anthropic" => (
+                "Anthropic",
+                "anthropic",
+                "https://api.anthropic.com/v1",
+                "claude-sonnet-4-5",
+            ),
+            "deepseek" => (
+                "DeepSeek",
+                "chat",
+                "https://api.deepseek.com/v1",
+                "deepseek-chat",
+            ),
+            "gemini" => (
+                "Gemini",
+                "chat",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "gemini-2.5-flash",
+            ),
+            "xai" => ("xAI", "chat", "https://api.x.ai/v1", "grok-4"),
+            "mistral" => (
+                "Mistral",
+                "chat",
+                "https://api.mistral.ai/v1",
+                "mistral-large-latest",
+            ),
+            "moonshot" => (
+                "Moonshot",
+                "chat",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.5",
+            ),
+            "qwen" => (
+                "Qwen",
+                "chat",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "qwen-plus",
+            ),
+            "zhipu" => (
+                "Zhipu",
+                "chat",
+                "https://open.bigmodel.cn/api/paas/v4",
+                "glm-4.7",
+            ),
+            "openrouter" => (
+                "OpenRouter",
+                "chat",
+                "https://openrouter.ai/api/v1",
+                "openrouter/auto",
+            ),
+            "local" => ("Local / Ollama", "chat", "http://localhost:11434/v1", ""),
+            _ => ("Custom", "chat", "", ""),
         };
         Self {
             id: id.into(),
@@ -106,7 +184,7 @@ impl Profile {
             provider: provider.into(),
             protocol: protocol.into(),
             endpoint: endpoint.into(),
-            model: String::new(),
+            model: model.into(),
             limits: Limits::default(),
             invalid_reason: None,
         }
@@ -167,7 +245,19 @@ impl Profile {
         Ok(())
     }
     pub fn key_required(&self) -> bool {
-        matches!(self.provider.as_str(), "openai" | "anthropic" | "deepseek")
+        matches!(
+            self.provider.as_str(),
+            "openai"
+                | "anthropic"
+                | "deepseek"
+                | "gemini"
+                | "xai"
+                | "mistral"
+                | "moonshot"
+                | "qwen"
+                | "zhipu"
+                | "openrouter"
+        )
     }
     pub fn credential_reference(&self) -> Result<String, AiError> {
         let base = self.base_url()?;
@@ -266,6 +356,11 @@ impl<'de> Deserialize<'de> for AiPreferences {
                 None => Vec::new(),
             };
         }
+        for profile in &mut result.profiles {
+            if profile.limits == Limits::previous_factory() {
+                profile.limits = Limits::default();
+            }
+        }
         Ok(result)
     }
 }
@@ -275,7 +370,10 @@ mod tests {
     use super::*;
     #[test]
     fn presets_normalize_once_and_local_needs_no_key() {
-        for provider in ["openai", "anthropic", "deepseek", "local"] {
+        for provider in Profile::PRESETS {
+            if provider == "custom" {
+                continue;
+            }
             let mut p = Profile::preset(provider, "test");
             p.model = "test-model".into();
             p.endpoint.push('/');
@@ -333,5 +431,127 @@ mod tests {
         let mut prefs = AiPreferences::default();
         prefs.profiles.push(Profile::default());
         assert!(prefs.selected().is_none());
+    }
+    #[test]
+    fn new_ceilings_accept_former_maximums_and_reject_the_new_ones() {
+        let mut limits = Limits::default();
+        assert!(limits.validate().is_ok());
+        limits.input_bytes = 2 * 1024 * 1024;
+        limits.output_bytes = 2 * 1024 * 1024;
+        limits.output_tokens = 32_769;
+        limits.idle_secs = 121;
+        assert!(limits.validate().is_ok());
+        limits.input_bytes = 8 * 1024 * 1024 + 1;
+        assert!(limits.validate().is_err());
+        limits.input_bytes = 512 * 1024;
+        limits.output_bytes = 4 * 1024 * 1024 + 1;
+        assert!(limits.validate().is_err());
+        limits.output_bytes = 512 * 1024;
+        limits.output_tokens = 131_073;
+        assert!(limits.validate().is_err());
+        limits.output_tokens = 8192;
+        limits.idle_secs = 301;
+        assert!(limits.validate().is_err());
+    }
+    #[test]
+    fn cloud_presets_require_keys_and_starter_models() {
+        let cases = [
+            (
+                "openai",
+                "https://api.openai.com/v1",
+                "gpt-5.2",
+                "responses",
+            ),
+            (
+                "anthropic",
+                "https://api.anthropic.com/v1",
+                "claude-sonnet-4-5",
+                "anthropic",
+            ),
+            (
+                "deepseek",
+                "https://api.deepseek.com/v1",
+                "deepseek-chat",
+                "chat",
+            ),
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "gemini-2.5-flash",
+                "chat",
+            ),
+            ("xai", "https://api.x.ai/v1", "grok-4", "chat"),
+            (
+                "mistral",
+                "https://api.mistral.ai/v1",
+                "mistral-large-latest",
+                "chat",
+            ),
+            (
+                "moonshot",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.5",
+                "chat",
+            ),
+            (
+                "qwen",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "qwen-plus",
+                "chat",
+            ),
+            (
+                "zhipu",
+                "https://open.bigmodel.cn/api/paas/v4",
+                "glm-4.7",
+                "chat",
+            ),
+            (
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                "openrouter/auto",
+                "chat",
+            ),
+        ];
+        for (provider, endpoint, model, protocol) in cases {
+            let profile = Profile::preset(provider, "test");
+            assert_eq!(profile.endpoint, endpoint);
+            assert_eq!(profile.model, model);
+            assert_eq!(profile.protocol, protocol);
+            assert!(profile.key_required());
+            profile.validate().unwrap();
+        }
+        assert!(!Profile::preset("custom", "test").key_required());
+        assert!(Profile::preset("custom", "test").model.is_empty());
+        assert!(Profile::preset("local", "test").model.is_empty());
+    }
+    #[test]
+    fn untouched_factory_limits_upgrade_and_custom_limits_stay() {
+        let old = r#"
+            selected_profile = "default"
+            [[profiles]]
+            id = "default"
+            name = "OpenAI"
+            provider = "openai"
+            protocol = "responses"
+            endpoint = "https://api.openai.com/v1"
+            model = "gpt-4o"
+            [profiles.limits]
+            input_bytes = 65536
+            output_bytes = 131072
+            tool_bytes = 65536
+            max_tools = 12
+            max_operations = 20
+            timeout_secs = 300
+            idle_secs = 30
+            output_tokens = 4096
+        "#;
+        let prefs: AiPreferences = toml::from_str(old).unwrap();
+        assert_eq!(prefs.profiles[0].limits, Limits::default());
+        assert_eq!(prefs.profiles[0].model, "gpt-4o");
+        let custom = old.replace("input_bytes = 65536", "input_bytes = 8192");
+        let prefs: AiPreferences = toml::from_str(&custom).unwrap();
+        assert_eq!(prefs.profiles[0].limits.input_bytes, 8192);
+        assert_eq!(prefs.profiles[0].limits.idle_secs, 30);
+        assert_eq!(prefs.profiles[0].limits.output_tokens, 4096);
     }
 }
