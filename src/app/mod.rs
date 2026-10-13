@@ -73,9 +73,9 @@ use markion::{
     organize_candidates, p0_t, p0_tf, p1_t, p1_tf, pandoc_available, percents_from_flex_weights,
     read_document_source, redistribute_adjacent_column_percents, reorder_block,
     resolve_font_family, resolve_html_img_display_size, save_app_preferences, save_session_state,
-    save_text_snapshot, save_theme_definition, serialize_inline_image, serialize_inline_link,
-    shortcut_catalog, sidebar_tab_label, slash_command_edit, slash_query_at,
-    snap_image_width_percent, t, table_column_flex_weights,
+    save_text_snapshot, save_theme_definition, serialize_html_anchor, serialize_inline_image,
+    serialize_inline_link, shortcut_catalog, sidebar_tab_label, simple_html_anchor_at,
+    slash_command_edit, slash_query_at, snap_image_width_percent, t, table_column_flex_weights,
     table_column_flex_weights_with_authored, table_column_width_prefix_len, task_checkbox_toggle,
     tf, title_from_path, transform_block, validate_block_target, workspace_relative_path,
 };
@@ -1466,6 +1466,24 @@ struct LinkEditorState {
     url: String,
     title: String,
     field: LinkEditorField,
+    /// Confirm writes an HTML `<a>` instead of a Markdown link.
+    html_anchor: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenEditorKind {
+    /// Exact authored slice, including a non-simple inline HTML element.
+    Raw,
+    /// Delimiter-free inline math payload. Confirm keeps the surrounding `$`.
+    MathPayload,
+}
+
+#[derive(Clone, Debug)]
+struct TokenEditorState {
+    kind: TokenEditorKind,
+    source_range: Range<usize>,
+    document_version: u64,
+    draft: String,
 }
 
 #[derive(Clone, Debug)]
@@ -2604,6 +2622,9 @@ struct MarkionApp {
     /// plus Windows-hidden-attribute entries on Windows). Persisted; disabled
     /// by default. The always-excluded noise list stays excluded regardless.
     show_hidden_files: bool,
+    /// When enabled, Visual Edit keeps non-empty inline syntax out of the
+    /// text flow. Persisted; disabled by default.
+    stable_visual_inline: bool,
     /// When enabled, non-explicit opens (File → Open, file-tree click,
     /// drag-drop, Open Recent) replace a safe-to-replace active tab instead
     /// of appending a new tab. Persisted; enabled by default.
@@ -2676,6 +2697,7 @@ struct MarkionApp {
     /// is pasted/dropped into an untitled tab and consumed after Save As.
     pending_image_import: Option<PendingImageBatch>,
     link_editor: Option<LinkEditorState>,
+    token_editor: Option<TokenEditorState>,
     /// Startup crash snapshots awaiting an explicit per-entry decision. This
     /// remains open independently of the active editor tab so unreadable or
     /// deferred snapshots are never silently removed.

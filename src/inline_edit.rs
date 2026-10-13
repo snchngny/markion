@@ -380,6 +380,168 @@ pub(crate) fn image_presentation_from_title(title: Option<&str>) -> Option<Image
     title.and_then(|title| split_presentation_title(title).1)
 }
 
+/// A simple HTML anchor: `<a>` with only `href` and an optional `title`, text
+/// content, and no nested tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimpleHtmlAnchor {
+    pub source_range: Range<usize>,
+    pub label: String,
+    pub url: String,
+    pub title: Option<String>,
+}
+
+pub fn simple_html_anchor_at(source: &str, offset: usize) -> Option<SimpleHtmlAnchor> {
+    let offset = offset.min(source.len());
+    let lower = source.to_ascii_lowercase();
+    let mut search_from = 0;
+    let mut found = None;
+    while let Some(rel) = lower[search_from..].find("<a") {
+        let start = search_from + rel;
+        let after_name = start + 2;
+        let next = source[after_name..].chars().next();
+        if !matches!(next, Some(ch) if ch.is_ascii_whitespace() || ch == '>' || ch == '/') {
+            search_from = after_name.max(search_from + 1);
+            continue;
+        }
+        let Some(gt) = source[after_name..].find('>') else {
+            break;
+        };
+        let tag_end = after_name + gt + 1;
+        if source[start..tag_end].ends_with("/>") {
+            search_from = tag_end;
+            continue;
+        }
+        let Some(close_rel) = lower[tag_end..].find("</a>") else {
+            search_from = tag_end;
+            continue;
+        };
+        let content_end = tag_end + close_rel;
+        let end = content_end + "</a>".len();
+        let content = &source[tag_end..content_end];
+        if let Some(anchor) = parse_simple_anchor(source, start, tag_end, content, end) {
+            if offset >= anchor.source_range.start && offset < anchor.source_range.end {
+                found = Some(anchor);
+            }
+        }
+        search_from = start + 2;
+    }
+    found
+}
+
+pub fn serialize_html_anchor(label: &str, url: &str, title: Option<&str>) -> String {
+    let mut rendered = String::from("<a href=\"");
+    push_escaped_attr(&mut rendered, url);
+    rendered.push('"');
+    if let Some(title) = title.filter(|title| !title.is_empty()) {
+        rendered.push_str(" title=\"");
+        push_escaped_attr(&mut rendered, title);
+        rendered.push('"');
+    }
+    rendered.push('>');
+    push_escaped_text(&mut rendered, label);
+    rendered.push_str("</a>");
+    rendered
+}
+
+fn parse_simple_anchor(
+    source: &str,
+    start: usize,
+    tag_end: usize,
+    content: &str,
+    end: usize,
+) -> Option<SimpleHtmlAnchor> {
+    if content.contains('<') {
+        return None;
+    }
+    let open = &source[start + 2..tag_end - 1];
+    let mut href = None;
+    let mut title = None;
+    let mut index = 0;
+    let bytes = open.as_bytes();
+    while index < open.len() {
+        while index < open.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= open.len() {
+            break;
+        }
+        if bytes[index] == b'/' {
+            return None;
+        }
+        let name_start = index;
+        while index < open.len() && is_attr_name(bytes[index]) {
+            index += 1;
+        }
+        if name_start == index {
+            return None;
+        }
+        let name = open[name_start..index].to_ascii_lowercase();
+        while index < open.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= open.len() || bytes[index] != b'=' {
+            return None;
+        }
+        index += 1;
+        while index < open.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= open.len() {
+            return None;
+        }
+        let quote = bytes[index];
+        if quote != b'"' && quote != b'\'' {
+            return None;
+        }
+        index += 1;
+        let value_start = index;
+        while index < open.len() && bytes[index] != quote {
+            index += 1;
+        }
+        if index >= open.len() {
+            return None;
+        }
+        let value = open[value_start..index].to_string();
+        index += 1;
+        match name.as_str() {
+            "href" if href.is_none() => href = Some(value),
+            "title" if title.is_none() => title = Some(value),
+            _ => return None,
+        }
+    }
+    Some(SimpleHtmlAnchor {
+        source_range: start..end,
+        label: content.to_string(),
+        url: href?,
+        title,
+    })
+}
+
+fn is_attr_name(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b':' || byte == b'_'
+}
+
+fn push_escaped_attr(out: &mut String, value: &str) {
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+fn push_escaped_text(out: &mut String, value: &str) {
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +630,35 @@ mod tests {
         assert!(!proven_single_line_image_span("![alt](url.png"));
         assert!(!proven_single_line_image_span("![alt][ref"));
         assert!(inline_image_at("![alt][ref]", 3).is_none());
+    }
+
+    #[test]
+    fn simple_html_anchor_round_trips_and_rejects_nested_markup() {
+        let source = r#"<a href="guide.md" title="Guide">Guide</a>"#;
+        let anchor = simple_html_anchor_at(source, source.find("Guide</").unwrap()).unwrap();
+        assert_eq!(anchor.label, "Guide");
+        assert_eq!(anchor.url, "guide.md");
+        assert_eq!(anchor.title.as_deref(), Some("Guide"));
+        assert_eq!(anchor.source_range, 0..source.len());
+        assert!(
+            simple_html_anchor_at(
+                r#"<a href="https://example.com"><img src="b.png" alt="B"></a>"#,
+                10
+            )
+            .is_none()
+        );
+        assert!(simple_html_anchor_at(r#"<a href="x" class="y">z</a>"#, 20).is_none());
+    }
+
+    #[test]
+    fn serialize_html_anchor_preserves_shape() {
+        assert_eq!(
+            serialize_html_anchor("Guide", "guide.md", Some("Guide")),
+            r#"<a href="guide.md" title="Guide">Guide</a>"#
+        );
+        assert_eq!(
+            serialize_html_anchor("简体中文", "README.zh-CN.md", None),
+            r#"<a href="README.zh-CN.md">简体中文</a>"#
+        );
     }
 }

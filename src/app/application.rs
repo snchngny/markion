@@ -329,6 +329,7 @@ impl MarkionApp {
             heading_menu_max_level: preferences.heading_menu_max_level,
             sync_scroll: preferences.sync_scroll,
             show_hidden_files: preferences.show_hidden_files,
+            stable_visual_inline: preferences.stable_visual_inline,
             open_in_current_tab: preferences.open_in_current_tab,
             markdown_auto_pair: preferences.markdown_auto_pair,
             language,
@@ -366,6 +367,7 @@ impl MarkionApp {
             name_editor_click_away: false,
             pending_image_import: None,
             link_editor: None,
+            token_editor: None,
             recovery_manager: None,
             slash_commands: None,
             dismissed_slash_query: None,
@@ -2216,6 +2218,7 @@ impl MarkionApp {
             heading_menu_max_level: self.heading_menu_max_level,
             sync_scroll: self.sync_scroll,
             show_hidden_files: self.show_hidden_files,
+            stable_visual_inline: self.stable_visual_inline,
             open_in_current_tab: self.open_in_current_tab,
             markdown_auto_pair: self.markdown_auto_pair,
             sidebar_visible: self.sidebar_visible,
@@ -2679,6 +2682,7 @@ impl MarkionApp {
             Some(SearchField::Git(_) | SearchField::GitSetup(_) | SearchField::GitCommit)
         ) || self.pending_name_input.is_some()
             || self.link_editor.is_some()
+            || self.token_editor.is_some()
             || self.file_tree_query_focused
             || (self.search_visible && self.search_control_focus.is_some())
     }
@@ -2689,6 +2693,9 @@ impl MarkionApp {
                 .pending_name_input
                 .as_mut()
                 .map(|pending| &mut pending.buffer);
+        }
+        if let Some(editor) = self.token_editor.as_mut() {
+            return Some(&mut editor.draft);
         }
         match self.link_editor.as_mut() {
             Some(editor) => Some(match editor.field {

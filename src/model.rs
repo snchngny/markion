@@ -457,6 +457,9 @@ pub struct AppPreferences {
     /// Disabled by default; the always-excluded build/dependency noise list
     /// (`target`, `node_modules`, …) stays excluded regardless of this flag.
     pub show_hidden_files: bool,
+    /// When enabled, Visual Edit keeps non-empty inline syntax out of the
+    /// text flow. Disabled by default, which preserves caret-triggered reveal.
+    pub stable_visual_inline: bool,
     /// When enabled, opening a supported document or image through a
     /// non-explicit entry (File → Open, file-tree click, drag-and-drop,
     /// Open Recent) replaces the active tab when that is safe (an image or
@@ -522,6 +525,7 @@ impl Default for AppPreferences {
             heading_menu_max_level: DEFAULT_HEADING_MENU_MAX_LEVEL,
             sync_scroll: false,
             show_hidden_files: false,
+            stable_visual_inline: false,
             open_in_current_tab: true,
             markdown_auto_pair: true,
             sidebar_visible: true,

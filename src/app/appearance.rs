@@ -133,6 +133,7 @@ impl MarkionApp {
                     app.refresh_typography_measurements(true, true);
                     app.heading_menu_max_level = preferences.heading_menu_max_level;
                     app.sync_scroll = preferences.sync_scroll;
+                    app.stable_visual_inline = preferences.stable_visual_inline;
                     app.open_in_current_tab = preferences.open_in_current_tab;
                     app.markdown_auto_pair = preferences.markdown_auto_pair;
                     app.sidebar_visible = preferences.sidebar_visible;
@@ -488,6 +489,21 @@ impl MarkionApp {
         // The watcher filters events by the hidden-entry rule it was armed
         // with, so re-arm it under the new rule.
         self.arm_file_tree_watch(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_stable_visual_inline(&mut self, cx: &mut Context<Self>) {
+        self.stable_visual_inline = !self.stable_visual_inline;
+        self.status = t(
+            self.language,
+            if self.stable_visual_inline {
+                Msg::StatusStableVisualInlineOn
+            } else {
+                Msg::StatusStableVisualInlineOff
+            },
+        )
+        .into();
+        self.persist_preferences();
         cx.notify();
     }
 

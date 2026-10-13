@@ -623,7 +623,8 @@ fn visual_inline_html_underline_reaches_painted_highlights() {
     let source = "plain <u>中文 **加粗**</u> tail";
     let doc = MarkdownDocument::from_text(source);
     let blocks = doc.visual_blocks_shared();
-    let projection = build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 0, None);
+    let projection =
+        build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 0, None, true);
     assert_eq!(projection.text, "plain 中文 加粗 tail");
     let highlights = visual_projection_highlights(&projection, None);
     for needle in ["中文", "加粗"] {
@@ -665,6 +666,7 @@ fn visual_pinyin_preedit_composes_sorted_utf8_highlights() {
         marked.end..marked.end,
         marked.end,
         Some(marked.clone()),
+        true,
     );
     let marked_display = projection
         .display_range_for_source_range(marked.clone())
@@ -4192,6 +4194,36 @@ fn global_shortcut_clear_restores_defaults_and_exits_capture(cx: &mut TestAppCon
         !reset.contains("session.layout") && !reset.contains("sidebar_width"),
         "Reset Preferences must not clear session chrome geometry"
     );
+    assert!(reset.contains("app.stable_visual_inline = preferences.stable_visual_inline"));
+}
+
+#[gpui::test]
+fn reset_preferences_clears_stable_visual_inline_without_touching_document(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx) = cx.add_window_view(|_, cx| MarkionApp::new(cx));
+    let (text, version) = app.update(cx, |app, _| {
+        app.stable_visual_inline = true;
+        let tab = app.active_tab();
+        (tab.document.text().to_string(), tab.document.version())
+    });
+    cx.update(|window, cx| {
+        window.focus(&app.read(cx).focus_handle);
+        window.activate_window();
+    });
+
+    cx.dispatch_action(ResetPreferences);
+    let reset_label = app.update(cx, |app, _| {
+        t(app.language, Msg::DialogButtonReset).to_string()
+    });
+    cx.simulate_prompt_answer(&reset_label);
+    cx.run_until_parked();
+
+    app.update(cx, |app, _| {
+        assert!(!app.stable_visual_inline);
+        assert_eq!(app.active_tab().document.text(), text);
+        assert_eq!(app.active_tab().document.version(), version);
+    });
 }
 
 #[gpui::test]
@@ -4561,6 +4593,241 @@ fn shortcuts_preferences_renders_in_light_and_dark_themes(cx: &mut TestAppContex
             assert_ne!(app.palette().app_bg, app.palette().text);
         });
     }
+}
+
+#[gpui::test]
+fn stable_visual_inline_preference_toggle_reflects_state_without_editing_document(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.preferences_panel_open = true;
+        app
+    });
+    let (text, version) = app.update(cx, |app, _| {
+        assert!(!app.stable_visual_inline);
+        let tab = app.active_tab();
+        (tab.document.text().to_string(), tab.document.version())
+    });
+    let panel = include_str!("root_view.rs");
+    assert!(panel.contains("Msg::PrefPanelStableVisualInline"));
+    assert!(panel.contains("app.stable_visual_inline"));
+    assert!(panel.contains("app.toggle_stable_visual_inline(cx)"));
+
+    app.update(cx, |app, cx| app.toggle_stable_visual_inline(cx));
+    app.update(cx, |app, _| {
+        assert!(app.stable_visual_inline);
+        assert_eq!(app.status, t(app.language, Msg::StatusStableVisualInlineOn));
+        assert_eq!(app.active_tab().document.text(), text);
+        assert_eq!(app.active_tab().document.version(), version);
+    });
+    app.update(cx, |app, cx| app.toggle_stable_visual_inline(cx));
+    app.update(cx, |app, _| {
+        assert!(!app.stable_visual_inline);
+        assert_eq!(
+            app.status,
+            t(app.language, Msg::StatusStableVisualInlineOff)
+        );
+    });
+}
+
+#[gpui::test]
+fn stable_visual_inline_edits_links_math_and_tokens_off_the_line(cx: &mut TestAppContext) {
+    let source = "<a href=\"#zh\">简体中文</a> <a href=\"#tw\">繁體中文</a>";
+    let cursor = source.find("简体中文").unwrap();
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(source))];
+        app.active_tab_mut().selected_range = cursor..cursor;
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        app
+    });
+    cx.update(|window, cx| {
+        window.focus(&app.read(cx).focus_handle);
+        window.activate_window();
+    });
+    cx.run_until_parked();
+    app.update(cx, |app, cx| app.move_to(source.find("繁").unwrap(), cx));
+    cx.run_until_parked();
+    app.update(cx, |app, _| {
+        assert!(app.link_editor.is_none());
+        let (text, _) = app.active_tab().visual_last_projection.as_ref().unwrap();
+        assert!(text.contains("简体中文"));
+        assert!(text.contains("繁體中文"));
+        assert!(!text.contains("<a"));
+        assert!(!text.contains('\n'));
+    });
+
+    let version = app.update(cx, |app, cx| {
+        app.open_link_editor_at(cursor, cx);
+        let editor = app.link_editor.as_ref().unwrap();
+        assert!(editor.html_anchor);
+        assert_eq!(editor.label, "简体中文");
+        assert_eq!(editor.url, "#zh");
+        app.active_tab().document.version()
+    });
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| app.confirm_link_editor(window, cx));
+    });
+    app.update(cx, |app, _| {
+        assert!(app.link_editor.is_none());
+        assert_eq!(app.active_tab().document.text(), source);
+        assert_eq!(app.active_tab().document.version(), version);
+    });
+
+    app.update(cx, |app, cx| {
+        app.open_link_editor_at(cursor, cx);
+        app.link_editor.as_mut().unwrap().url = "guide.md".into();
+    });
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| app.confirm_link_editor(window, cx));
+    });
+    app.update(cx, |app, _| {
+        let text = app.active_tab().document.text();
+        assert!(text.contains("<a href=\"guide.md\">简体中文</a>"));
+        assert!(!text.contains("](guide.md)"));
+        assert!(app.active_tab_mut().apply_undo());
+        assert_eq!(app.active_tab().document.text(), source);
+    });
+
+    let version_after_undo = app.update(cx, |app, _| app.active_tab().document.version());
+    app.update(cx, |app, cx| {
+        app.open_link_editor_at(cursor, cx);
+        app.link_editor.as_mut().unwrap().url = "changed.md".into();
+        app.cancel_link_editor(cx);
+        assert_eq!(app.active_tab().document.text(), source);
+        assert_eq!(app.active_tab().document.version(), version_after_undo);
+    });
+
+    let nested = "See <a href=\"https://example.com\"><img src=\"b.png\" alt=\"B\"></a> here";
+    let nested_at = nested.find("example").unwrap();
+    app.update(cx, |app, cx| {
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(nested))];
+        app.active_tab_mut().selected_range = nested_at..nested_at;
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        app.open_link_editor_at(nested_at, cx);
+        assert!(app.link_editor.is_none());
+        assert!(app.token_editor.is_some());
+        let before = app.active_tab().document.version();
+        app.cancel_token_editor(cx);
+        assert!(app.token_editor.is_none());
+        assert_eq!(app.active_tab().document.text(), nested);
+        assert_eq!(app.active_tab().document.version(), before);
+    });
+
+    let math = "Energy $E=mc^2$ stays.";
+    let math_doc = MarkdownDocument::from_text(math);
+    let math_range = math_doc
+        .visual_blocks()
+        .into_iter()
+        .find_map(|block| {
+            block.editable_runs.into_iter().find_map(|run| {
+                run.math
+                    .filter(|math| math.latex.contains("mc"))
+                    .map(|_| run.content_range)
+            })
+        })
+        .expect("inline math range");
+    app.update(cx, |app, cx| {
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(math))];
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        let before = app.active_tab().document.version();
+        app.open_inline_math_editor(math_range.clone(), cx);
+        assert_eq!(app.token_editor.as_ref().unwrap().draft, "E=mc^2");
+        assert_eq!(app.active_tab().document.version(), before);
+        app.cancel_token_editor(cx);
+        assert_eq!(app.active_tab().document.version(), before);
+        app.open_inline_math_editor(math_range, cx);
+        app.token_editor.as_mut().unwrap().draft = "E=mc".into();
+    });
+    app.update(cx, |app, cx| app.confirm_token_editor(cx));
+    app.update(cx, |app, _| {
+        assert_eq!(app.active_tab().document.text(), "Energy $E=mc$ stays.");
+        assert!(app.active_tab_mut().apply_undo());
+        assert_eq!(app.active_tab().document.text(), math);
+    });
+
+    let entity = "fish &amp; chips";
+    let entity_end = entity.find("&amp;").unwrap() + "&amp;".len();
+    app.update(cx, |app, cx| {
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(entity))];
+        app.active_tab_mut().selected_range = entity_end..entity_end;
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        let before = app.active_tab().document.version();
+        app.open_stable_token_at(entity_end, cx);
+        let editor = app.token_editor.as_ref().unwrap();
+        assert_eq!(editor.draft, "&amp;");
+        app.cancel_token_editor(cx);
+        assert_eq!(app.active_tab().document.text(), entity);
+        assert_eq!(app.active_tab().document.version(), before);
+        cx.notify();
+    });
+    cx.dispatch_action(Backspace);
+    app.update(cx, |app, _| {
+        assert_eq!(app.active_tab().document.text(), "fish  chips");
+        assert_eq!(app.active_tab().undo_stack.len(), 1);
+    });
+
+    let image = "![图](old.png \"Caption\")";
+    let image_doc = MarkdownDocument::from_text(image);
+    let image_id = image_doc
+        .visual_blocks()
+        .into_iter()
+        .find_map(|block| match block.editor {
+            Some(VisualBlockEditor::Image { .. }) => Some(block.id),
+            _ => None,
+        })
+        .expect("image block");
+    app.update(cx, |app, cx| {
+        app.tabs = vec![EditorTab::new(image_doc)];
+        app.active_tab_mut().selected_range = 2..2;
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    app.update(cx, |app, _| {
+        assert!(!app.active_tab().is_visual_source_expanded(image_id));
+        app.active_tab_mut().toggle_visual_source_expanded(image_id);
+        assert!(app.active_tab().is_visual_source_expanded(image_id));
+    });
+}
+
+#[gpui::test]
+fn stable_visual_inline_ime_hides_markers_in_one_undo_group(cx: &mut TestAppContext) {
+    let source = "a **bold** z";
+    let cursor = source.find("bold").unwrap() + 1;
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(source))];
+        app.active_tab_mut().selected_range = cursor..cursor;
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        app
+    });
+    cx.update(|window, cx| {
+        window.focus(&app.read(cx).focus_handle);
+        window.activate_window();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            EntityInputHandler::replace_and_mark_text_in_range(app, None, "你", None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    app.update(cx, |app, _| {
+        let tab = app.active_tab();
+        assert_eq!(tab.undo_stack.len(), 1);
+        let (text, revealed) = tab.visual_last_projection.as_ref().unwrap();
+        assert!(text.contains('你'));
+        assert!(!text.contains("**"));
+        assert!(revealed.is_empty());
+    });
 }
 
 #[gpui::test]
@@ -8513,6 +8780,49 @@ fn visual_edit_renders_local_live_preview_projection_and_edits_source(cx: &mut T
         let (text, revealed) = app.active_tab().visual_last_projection.as_ref().unwrap();
         assert_eq!(text, "plain bold and [sXite](url) tail");
         assert_eq!(revealed.len(), 1);
+    });
+}
+
+#[gpui::test]
+fn stable_visual_inline_keeps_version_and_block_cache(cx: &mut TestAppContext) {
+    let source = "plain **bold** tail";
+    let cursor = source.find("bold").unwrap();
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(source))];
+        app.active_tab_mut().selected_range = cursor..cursor;
+        app.active_tab_mut().visual_cursor_reveal_pending = true;
+        app.view_mode = ViewMode::VisualEdit;
+        app
+    });
+    cx.update(|window, cx| {
+        window.focus(&app.read(cx).focus_handle);
+        window.activate_window();
+    });
+    cx.run_until_parked();
+
+    let (version, cached) = app.update(cx, |app, _| {
+        let tab = app.active_tab();
+        let (text, revealed) = tab.visual_last_projection.as_ref().unwrap();
+        assert!(text.contains("**bold**"));
+        assert_eq!(revealed.len(), 1);
+        (tab.document.version(), tab.document.visual_blocks_shared())
+    });
+
+    app.update(cx, |app, cx| {
+        app.stable_visual_inline = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    app.update(cx, |app, _| {
+        let tab = app.active_tab();
+        assert_eq!(tab.document.version(), version);
+        assert_eq!(tab.document.text(), source);
+        assert!(Arc::ptr_eq(&cached, &tab.document.visual_blocks_shared()));
+        let (text, revealed) = tab.visual_last_projection.as_ref().unwrap();
+        assert_eq!(text, "plain bold tail");
+        assert!(revealed.is_empty());
     });
 }
 

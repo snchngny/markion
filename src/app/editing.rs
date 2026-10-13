@@ -1,4 +1,97 @@
+use std::ops::Range;
+
 use super::*;
+
+fn non_simple_anchor_range(
+    text: &str,
+    document: &MarkdownDocument,
+    cursor: usize,
+) -> Option<Range<usize>> {
+    let blocks = document.visual_blocks_shared();
+    let range = blocks.iter().find_map(|block| {
+        block.reveal_groups.iter().find_map(|group| {
+            if group.kind != markion::VisualRevealKind::InlineHtml {
+                return None;
+            }
+            let contains = group.source_range.contains(&cursor) || cursor == group.source_range.end;
+            contains.then(|| group.source_range.clone())
+        })
+    })?;
+    let slice = text.get(range.clone())?;
+    let trimmed = slice.trim_start();
+    if trimmed.len() < 2 || !trimmed[..2].eq_ignore_ascii_case("<a") {
+        return None;
+    }
+    if simple_html_anchor_at(slice, 0).is_some() {
+        return None;
+    }
+    Some(range)
+}
+
+fn inline_math_payload(authored: &str) -> String {
+    let mut body = authored.trim();
+    if let Some(stripped) = body.strip_prefix("$$") {
+        body = stripped;
+    } else if let Some(stripped) = body.strip_prefix('$') {
+        body = stripped;
+    }
+    if let Some(stripped) = body.strip_suffix("$$") {
+        body = stripped;
+    } else if let Some(stripped) = body.strip_suffix('$') {
+        body = stripped;
+    }
+    body.to_string()
+}
+
+fn wrap_inline_math_payload(authored: &str, payload: &str) -> String {
+    let trimmed = authored.trim();
+    if trimmed.starts_with("$$") && trimmed.ends_with("$$") {
+        format!("$${payload}$$")
+    } else {
+        format!("${payload}$")
+    }
+}
+
+fn stable_opaque_token_range(
+    document: &MarkdownDocument,
+    cursor: usize,
+    forward: bool,
+) -> Option<Range<usize>> {
+    let blocks = document.visual_blocks_shared();
+    for block in blocks.iter() {
+        for group in &block.reveal_groups {
+            let opaque = match group.kind {
+                markion::VisualRevealKind::Escape
+                | markion::VisualRevealKind::Entity
+                | markion::VisualRevealKind::Emoji => true,
+                markion::VisualRevealKind::InlineHtml => {
+                    let slice = document
+                        .text()
+                        .get(group.source_range.clone())
+                        .unwrap_or("");
+                    let compact: String = slice.chars().filter(|ch| !ch.is_whitespace()).collect();
+                    compact.eq_ignore_ascii_case("<br>")
+                        || compact.eq_ignore_ascii_case("<br/>")
+                        || compact.eq_ignore_ascii_case("<br />")
+                }
+                _ => false,
+            };
+            if !opaque {
+                continue;
+            }
+            let range = &group.source_range;
+            let hit = if forward {
+                cursor >= range.start && cursor < range.end
+            } else {
+                cursor > range.start && cursor <= range.end
+            };
+            if hit {
+                return Some(range.clone());
+            }
+        }
+    }
+    None
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ResolvedVisualNavigation {
@@ -1669,10 +1762,38 @@ impl MarkionApp {
     }
 
     pub(super) fn open_link_editor(&mut self, cx: &mut Context<Self>) {
-        self.dismiss_visual_block_menu();
-        let selected = self.active_tab().safe_selected_range();
         let cursor = self.active_tab().cursor_offset();
-        let existing = inline_link_at(self.active_tab().document.text(), cursor);
+        self.open_link_editor_at(cursor, cx);
+    }
+
+    pub(super) fn open_link_editor_at(&mut self, cursor: usize, cx: &mut Context<Self>) {
+        self.dismiss_visual_block_menu();
+        self.token_editor = None;
+        let text = self.active_tab().document.text().to_string();
+        if let Some(anchor) = simple_html_anchor_at(&text, cursor) {
+            self.link_editor = Some(LinkEditorState {
+                kind: LinkEditorKind::Link,
+                source_range: anchor.source_range,
+                document_version: self.active_tab().document.version(),
+                label: anchor.label,
+                url: anchor.url,
+                title: anchor.title.unwrap_or_default(),
+                field: LinkEditorField::Url,
+                html_anchor: true,
+            });
+            self.input_marked_len = 0;
+            self.status = p0_t(self.language, P0Msg::EditingLink).into();
+            cx.notify();
+            return;
+        }
+        if self.stable_visual_inline
+            && let Some(range) = non_simple_anchor_range(&text, &self.active_tab().document, cursor)
+        {
+            self.open_token_editor(TokenEditorKind::Raw, range, &text, cx);
+            return;
+        }
+        let selected = self.active_tab().safe_selected_range();
+        let existing = inline_link_at(&text, cursor);
         let (source_range, label, url, title) = if let Some(link) = existing {
             (
                 link.source_range,
@@ -1683,7 +1804,7 @@ impl MarkionApp {
         } else if !selected.is_empty() {
             (
                 selected.clone(),
-                self.active_tab().document.text()[selected].to_string(),
+                text.get(selected.clone()).unwrap_or("").to_string(),
                 String::new(),
                 String::new(),
             )
@@ -1698,9 +1819,141 @@ impl MarkionApp {
             url,
             title,
             field: LinkEditorField::Url,
+            html_anchor: false,
         });
         self.input_marked_len = 0;
         self.status = p0_t(self.language, P0Msg::EditingLink).into();
+        cx.notify();
+    }
+
+    pub(super) fn open_stable_token_at(&mut self, cursor: usize, cx: &mut Context<Self>) {
+        if !self.stable_visual_inline {
+            return;
+        }
+        let text = self.active_tab().document.text().to_string();
+        let range = stable_opaque_token_range(&self.active_tab().document, cursor, true)
+            .or_else(|| stable_opaque_token_range(&self.active_tab().document, cursor, false));
+        let Some(range) = range else {
+            return;
+        };
+        self.open_token_editor(TokenEditorKind::Raw, range, &text, cx);
+    }
+
+    pub(super) fn open_inline_math_editor(
+        &mut self,
+        source_range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.stable_visual_inline {
+            return;
+        }
+        let text = self.active_tab().document.text();
+        let Some(authored) = text.get(source_range.clone()) else {
+            return;
+        };
+        let draft = inline_math_payload(authored);
+        self.link_editor = None;
+        self.token_editor = Some(TokenEditorState {
+            kind: TokenEditorKind::MathPayload,
+            source_range,
+            document_version: self.active_tab().document.version(),
+            draft,
+        });
+        self.input_marked_len = 0;
+        self.status = t(self.language, Msg::VisualInlineEditFormula).into();
+        cx.notify();
+    }
+
+    fn open_token_editor(
+        &mut self,
+        kind: TokenEditorKind,
+        source_range: Range<usize>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = text.get(source_range.clone()) else {
+            return;
+        };
+        self.link_editor = None;
+        self.token_editor = Some(TokenEditorState {
+            kind,
+            source_range,
+            document_version: self.active_tab().document.version(),
+            draft: draft.to_string(),
+        });
+        self.input_marked_len = 0;
+        self.status = t(
+            self.language,
+            match kind {
+                TokenEditorKind::MathPayload => Msg::VisualInlineEditFormula,
+                TokenEditorKind::Raw => Msg::VisualInlineEditSource,
+            },
+        )
+        .into();
+        cx.notify();
+    }
+
+    pub(super) fn cancel_token_editor(&mut self, cx: &mut Context<Self>) {
+        self.token_editor = None;
+        self.input_marked_len = 0;
+        self.status = t(self.language, Msg::StatusCanceled).into();
+        cx.notify();
+    }
+
+    pub(super) fn confirm_token_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.token_editor.take() else {
+            return;
+        };
+        self.input_marked_len = 0;
+        if self.active_tab().document.version() != editor.document_version {
+            self.status = p0_t(self.language, P0Msg::LinkStale).into();
+            cx.notify();
+            return;
+        }
+        let current = self
+            .active_tab()
+            .document
+            .text()
+            .get(editor.source_range.clone())
+            .unwrap_or("")
+            .to_string();
+        let replacement = match editor.kind {
+            TokenEditorKind::Raw => editor.draft,
+            TokenEditorKind::MathPayload => wrap_inline_math_payload(&current, &editor.draft),
+        };
+        if replacement == current {
+            self.status = t(self.language, Msg::StatusCanceled).into();
+            cx.notify();
+            return;
+        }
+        self.active_tab_mut().finish_undo_capture();
+        let snapshot = self.snapshot();
+        let start = editor.source_range.start;
+        let mutation = {
+            let tab = self.active_tab_mut();
+            CheckedMutation::range(
+                tab.document.instance_id(),
+                editor.document_version,
+                MutationOrigin::MarkdownFormat,
+                editor.source_range.clone(),
+                current,
+                &replacement,
+            )
+        };
+        if self
+            .apply_document_mutation("confirm_token_editor", mutation)
+            .is_none()
+        {
+            cx.notify();
+            return;
+        }
+        self.commit_undo_snapshot(snapshot);
+        let tab = self.active_tab_mut();
+        tab.selected_range = start..start + replacement.len();
+        tab.selection_reversed = false;
+        tab.marked_range = None;
+        self.status = t(self.language, Msg::StatusEditing).into();
+        self.after_document_changed(cx);
         cx.notify();
     }
 
@@ -1813,11 +2066,40 @@ impl MarkionApp {
             );
             return;
         }
-        let replacement = serialize_inline_link(
-            &editor.label,
-            editor.url.trim(),
-            (!editor.title.trim().is_empty()).then_some(editor.title.trim()),
-        );
+        let current = self
+            .active_tab()
+            .document
+            .text()
+            .get(editor.source_range.clone())
+            .unwrap_or("")
+            .to_string();
+        let replacement = if editor.html_anchor {
+            let unchanged = simple_html_anchor_at(&current, 0).is_some_and(|parsed| {
+                parsed.label == editor.label
+                    && parsed.url == editor.url.trim()
+                    && parsed.title.unwrap_or_default() == editor.title.trim()
+            });
+            if unchanged {
+                current.clone()
+            } else {
+                serialize_html_anchor(
+                    &editor.label,
+                    editor.url.trim(),
+                    (!editor.title.trim().is_empty()).then_some(editor.title.trim()),
+                )
+            }
+        } else {
+            serialize_inline_link(
+                &editor.label,
+                editor.url.trim(),
+                (!editor.title.trim().is_empty()).then_some(editor.title.trim()),
+            )
+        };
+        if replacement == current {
+            self.status = t(self.language, Msg::StatusFmtLink).into();
+            cx.notify();
+            return;
+        }
         self.active_tab_mut().finish_undo_capture();
         let snapshot = self.snapshot();
         let start = editor.source_range.start;
@@ -1933,6 +2215,7 @@ impl MarkionApp {
             url: String::new(),
             title: String::new(),
             field: LinkEditorField::Url,
+            html_anchor: false,
         });
         self.input_marked_len = 0;
         cx.notify();
@@ -1960,6 +2243,7 @@ impl MarkionApp {
             url: value,
             title: String::new(),
             field: LinkEditorField::Url,
+            html_anchor: false,
         });
         self.input_marked_len = 0;
         cx.notify();
@@ -3430,6 +3714,9 @@ impl MarkionApp {
             return;
         }
 
+        if self.delete_stable_opaque_token(false, cx) {
+            return;
+        }
         if self.active_tab().selected_range.is_empty() {
             let boundary = self.previous_boundary(self.cursor_offset());
             self.select_to(boundary, cx);
@@ -3490,12 +3777,51 @@ impl MarkionApp {
             return;
         }
 
+        if self.delete_stable_opaque_token(true, cx) {
+            return;
+        }
         if self.active_tab().selected_range.is_empty() {
             let boundary = self.next_boundary(self.cursor_offset());
             self.select_to(boundary, cx);
             self.active_tab_mut().pending_text_edit_intent = Some(UndoCaptureKind::Delete);
         }
         self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_stable_opaque_token(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        if !self.stable_visual_inline || !matches!(self.view_mode, ViewMode::VisualEdit) {
+            return false;
+        }
+        if !self.active_tab().selected_range.is_empty() {
+            return false;
+        }
+        let Some(range) =
+            stable_opaque_token_range(&self.active_tab().document, self.cursor_offset(), forward)
+        else {
+            return false;
+        };
+        self.push_undo_snapshot();
+        let start = range.start;
+        let mutation = {
+            let tab = self.active_tab_mut();
+            tab.document
+                .prepare_range_mutation(MutationOrigin::StructuralEdit, range, "")
+        };
+        if self
+            .apply_document_mutation("stable_opaque_token", mutation)
+            .is_none()
+        {
+            cx.notify();
+            return true;
+        }
+        let tab = self.active_tab_mut();
+        tab.selected_range = start..start;
+        tab.selection_reversed = false;
+        tab.marked_range = None;
+        self.status = t(self.language, Msg::StatusEditing).into();
+        self.after_document_changed(cx);
+        cx.notify();
+        true
     }
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {

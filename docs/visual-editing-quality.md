@@ -157,6 +157,8 @@ Every user-visible construct belongs to exactly one of three classes:
 
 The old five-class taxonomy folded its "dedicated editor" class into rendered WYSIWYG and reclassified "source island" as roadmap gaps.
 
+**Keep inline syntax hidden** (`stable_visual_inline`, default off) is a presentation preference, not a fourth class. While it is off, inline progressive-reveal constructs still reveal their smallest source group at the caret. While it is on, those inline constructs stay rendered and non-visible source is edited off the line: the link editor for Markdown links and simple HTML anchors, a floating payload editor for inline math, and an exact-token editor for escapes, entities, emoji shortcodes, `<br>`, and non-simple inline HTML. Structural prefixes stay progressive-reveal. Code fences, display and fenced math, diagrams, tables, front matter, HTML blocks, and the image source toggle keep their existing editors.
+
 ## WYSIWYG Coverage Roadmap
 
 Prioritized open gaps (refreshed 2026-10-01; each closes via a future change citing the `WYSIWYG coverage roadmap` requirement):

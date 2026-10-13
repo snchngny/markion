@@ -881,6 +881,9 @@ impl Render for MarkionApp {
             .when(self.link_editor.is_some(), |root| {
                 root.child(link_editor_view(self, cx))
             })
+            .when(self.token_editor.is_some(), |root| {
+                root.child(token_editor_view(self, cx))
+            })
             .when(self.slash_commands.is_some(), |root| {
                 root.child(slash_command_palette_view(self, cx))
             })
@@ -1793,6 +1796,81 @@ fn recovery_manager_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div 
                                     ),
                             )
                         }),
+                ),
+        )
+}
+
+fn token_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
+    let editor = app.token_editor.as_ref().expect("token editor visible");
+    let title = match editor.kind {
+        TokenEditorKind::MathPayload => app.tr(Msg::VisualInlineEditFormula),
+        TokenEditorKind::Raw => app.tr(Msg::VisualInlineEditSource),
+    };
+    let field_label = match editor.kind {
+        TokenEditorKind::MathPayload => app.tr(Msg::VisualInlineFormulaLabel),
+        TokenEditorKind::Raw => app.tr(Msg::VisualInlineSourceLabel),
+    };
+    let draft = editor.draft.clone();
+    div()
+        .absolute()
+        .top(px(62.))
+        .right(px(24.))
+        .w(px(420.))
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0xcbd5e1))
+        .bg(rgb(0xffffff))
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(
+            div()
+                .p_2()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(0x2563eb))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(0x64748b))
+                        .child(field_label),
+                )
+                .child(div().mt_1().text_size(px(13.)).child(if draft.is_empty() {
+                    " ".to_string()
+                } else {
+                    draft
+                })),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    div()
+                        .id("token-editor-cancel")
+                        .px_3()
+                        .py_1()
+                        .cursor(CursorStyle::PointingHand)
+                        .child(t(app.language, Msg::DialogButtonCancel))
+                        .on_click(cx.listener(|app, _, _, cx| app.cancel_token_editor(cx))),
+                )
+                .child(
+                    div()
+                        .id("token-editor-apply")
+                        .px_3()
+                        .py_1()
+                        .cursor(CursorStyle::PointingHand)
+                        .child(t(app.language, Msg::DialogButtonOk))
+                        .on_click(cx.listener(|app, _, _, cx| app.confirm_token_editor(cx))),
                 ),
         )
 }
@@ -5822,6 +5900,17 @@ pub(super) fn preferences_panel_view(
                                                 cx.listener(
                                                     |app, _: &MouseUpEvent, _window, cx| {
                                                         app.toggle_show_hidden_files(cx);
+                                                    },
+                                                ),
+                                            ))
+                                            .child(preference_boolean_row(
+                                                app.tr(Msg::PrefPanelStableVisualInline),
+                                                app.stable_visual_inline,
+                                                app.language,
+                                                palette,
+                                                cx.listener(
+                                                    |app, _: &MouseUpEvent, _window, cx| {
+                                                        app.toggle_stable_visual_inline(cx);
                                                     },
                                                 ),
                                             ))

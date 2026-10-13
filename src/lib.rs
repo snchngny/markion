@@ -47,9 +47,9 @@ mod visual;
 pub use document_memory::{DocumentMemoryBreakdown, DocumentMemorySite};
 use inline_edit::image_presentation_from_title;
 pub use inline_edit::{
-    ImageAlignment, ImagePresentation, InlineMarkdownTarget, clamp_image_width_percent,
-    inline_image_at, inline_link_at, serialize_inline_image, serialize_inline_link,
-    snap_image_width_percent,
+    ImageAlignment, ImagePresentation, InlineMarkdownTarget, SimpleHtmlAnchor,
+    clamp_image_width_percent, inline_image_at, inline_link_at, serialize_html_anchor,
+    serialize_inline_image, serialize_inline_link, simple_html_anchor_at, snap_image_width_percent,
 };
 
 /// Markdown shown in the first in-memory document when Markion starts.
@@ -9230,6 +9230,7 @@ Intro.
             heading_menu_max_level: EXTENDED_HEADING_MENU_MAX_LEVEL,
             sync_scroll: true,
             show_hidden_files: true,
+            stable_visual_inline: true,
             open_in_current_tab: false,
             markdown_auto_pair: false,
             sidebar_visible: false,
@@ -9269,6 +9270,7 @@ Intro.
         assert!(written.contains("background_check = true"));
         assert!(written.contains("heading_menu_max_level = 6"));
         assert!(written.contains("sync_scroll = true"));
+        assert!(written.contains("stable_visual_inline = true"));
         assert!(written.contains("markdown_auto_pair = false"));
         assert!(written.contains("[auto_save]"));
         assert!(written.contains("silent_save = false"));

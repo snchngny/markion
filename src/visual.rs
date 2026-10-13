@@ -316,13 +316,32 @@ impl ProjectionPiece {
     }
 }
 
+fn reveal_group_visible_text(block: &VisualBlock, group: &VisualRevealGroup) -> String {
+    let mut text = String::new();
+    for run in &block.editable_runs {
+        if run.content_range.start >= group.source_range.start
+            && run.content_range.end <= group.source_range.end
+        {
+            text.push_str(&run.visible_text);
+        }
+    }
+    text
+}
+
 pub fn build_visual_projection(
     source: &str,
     block: &VisualBlock,
     source_selection: Range<usize>,
     source_cursor: usize,
 ) -> VisualProjection {
-    build_visual_projection_with_marked_range(source, block, source_selection, source_cursor, None)
+    build_visual_projection_with_marked_range(
+        source,
+        block,
+        source_selection,
+        source_cursor,
+        None,
+        true,
+    )
 }
 
 pub fn build_visual_projection_with_marked_range(
@@ -331,6 +350,7 @@ pub fn build_visual_projection_with_marked_range(
     source_selection: Range<usize>,
     source_cursor: usize,
     marked_range: Option<Range<usize>>,
+    reveal_inline: bool,
 ) -> VisualProjection {
     let endpoint_is_active = |range: &Range<usize>, include_end: bool| {
         range.contains(&source_cursor)
@@ -349,6 +369,26 @@ pub fn build_visual_projection_with_marked_range(
         .reveal_groups
         .iter()
         .filter(|group| {
+            // Stable inline editing keeps groups rendered. An empty delimiter
+            // pair that owns the caret or marked range still reveals so a
+            // freshly auto-paired marker stays visible. Images, links, math,
+            // and opaque tokens stay rendered even when their visible text
+            // is empty; they are edited off the line.
+            if !reveal_inline
+                && !(reveal_group_visible_text(block, group).is_empty()
+                    && matches!(
+                        group.kind,
+                        VisualRevealKind::Strong
+                            | VisualRevealKind::Emphasis
+                            | VisualRevealKind::Strikethrough
+                            | VisualRevealKind::InlineCode
+                            | VisualRevealKind::Highlight
+                            | VisualRevealKind::Superscript
+                            | VisualRevealKind::Subscript
+                    ))
+            {
+                return false;
+            }
             endpoint_is_active(
                 &group.source_range,
                 matches!(
@@ -5181,8 +5221,14 @@ mod tests {
         assert_eq!(escapes, vec![r"\\", r"\*"]);
 
         let star_byte = source.find('*').unwrap();
-        let projection =
-            build_visual_projection_with_marked_range(source, &blocks[0], 0..0, star_byte, None);
+        let projection = build_visual_projection_with_marked_range(
+            source,
+            &blocks[0],
+            0..0,
+            star_byte,
+            None,
+            true,
+        );
         assert!(
             projection
                 .revealed_source_ranges
@@ -5191,7 +5237,7 @@ mod tests {
         );
 
         let projection =
-            build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 0, None);
+            build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 0, None, true);
         assert_eq!(projection.text, r"literal \ and * star");
     }
 
@@ -5285,7 +5331,7 @@ mod tests {
         // Caret anywhere inside the token reveals the complete authored form.
         for cursor in token_start..token_start + "&amp;".len() {
             let projection =
-                build_visual_projection_with_marked_range(source, block, 0..0, cursor, None);
+                build_visual_projection_with_marked_range(source, block, 0..0, cursor, None, true);
             assert!(
                 projection
                     .revealed_source_ranges
@@ -5296,7 +5342,8 @@ mod tests {
         }
 
         // Caret outside keeps the decoded rendering.
-        let projection = build_visual_projection_with_marked_range(source, block, 0..0, 0, None);
+        let projection =
+            build_visual_projection_with_marked_range(source, block, 0..0, 0, None, true);
         assert_eq!(projection.text, "fish & chips");
         assert!(projection.revealed_source_ranges.is_empty());
 
@@ -5385,8 +5432,14 @@ mod tests {
 
         // Caret inside the entity activates only the containing strong group.
         let token_start = source.find("&amp;").unwrap();
-        let projection =
-            build_visual_projection_with_marked_range(source, block, 0..0, token_start + 1, None);
+        let projection = build_visual_projection_with_marked_range(
+            source,
+            block,
+            0..0,
+            token_start + 1,
+            None,
+            true,
+        );
         assert_eq!(
             projection.revealed_source_ranges,
             vec![0..source.len()],
@@ -5636,6 +5689,7 @@ mod tests {
             0..0,
             0,
             Some(marked.clone()),
+            true,
         );
 
         assert_eq!(projection.text, source);
@@ -5720,6 +5774,194 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["[site](url \"Title\")"]
         );
+    }
+
+    #[test]
+    fn stable_projection_hides_nonempty_inline_groups_and_keeps_prefixes() {
+        let source = "**bold** and [site](url) plus <a href=\"#zh\">简体中文</a> <a href=\"#tw\">繁體中文</a>";
+        let doc = MarkdownDocument::from_text(source);
+        let block = doc
+            .visual_blocks()
+            .into_iter()
+            .find(|block| {
+                block
+                    .editable_runs
+                    .iter()
+                    .any(|run| run.visible_text.contains("bold"))
+            })
+            .expect("prose block");
+        let bold_cursor = source.find("bold").unwrap();
+        let stable = build_visual_projection_with_marked_range(
+            source,
+            &block,
+            bold_cursor..bold_cursor,
+            bold_cursor,
+            None,
+            false,
+        );
+        assert_eq!(stable.text, "bold and site plus 简体中文 繁體中文");
+        assert!(stable.revealed_source_ranges.is_empty());
+        assert!(!stable.text.contains('\n'));
+
+        let link_cursor = source.find("site").unwrap();
+        let link = build_visual_projection_with_marked_range(
+            source,
+            &block,
+            link_cursor..link_cursor,
+            link_cursor,
+            None,
+            false,
+        );
+        assert_eq!(link.text, stable.text);
+
+        let anchor_cursor = source.find("简体中文").unwrap();
+        let anchor = build_visual_projection_with_marked_range(
+            source,
+            &block,
+            anchor_cursor..anchor_cursor,
+            anchor_cursor,
+            None,
+            false,
+        );
+        assert_eq!(anchor.text, stable.text);
+
+        let revealed =
+            build_visual_projection(source, &block, bold_cursor..bold_cursor, bold_cursor);
+        assert!(revealed.text.contains("**bold**"));
+
+        let heading_source = "## Title";
+        let heading_doc = MarkdownDocument::from_text(heading_source);
+        let heading_blocks = heading_doc.visual_blocks();
+        let heading = &heading_blocks[0];
+        let prefix_end = heading.block_prefix.as_ref().unwrap().source_range.end;
+        let heading_projection = build_visual_projection_with_marked_range(
+            heading_source,
+            heading,
+            prefix_end..prefix_end,
+            prefix_end,
+            None,
+            false,
+        );
+        assert!(
+            heading_projection.text.starts_with("##"),
+            "heading prefix stays revealed, got {:?}",
+            heading_projection.text
+        );
+
+        let quote_source = "> > 3. item";
+        let quote_doc = MarkdownDocument::from_text(quote_source);
+        let quote_block = quote_doc
+            .visual_blocks()
+            .into_iter()
+            .find(|block| matches!(block.kind, VisualBlockKind::ListItem { .. }))
+            .unwrap();
+        let quote_cursor = quote_block.quote_context.as_ref().unwrap().marker_ranges[0].start;
+        let quote_projection = build_visual_projection_with_marked_range(
+            quote_source,
+            &quote_block,
+            quote_cursor..quote_cursor,
+            quote_cursor,
+            None,
+            false,
+        );
+        assert_eq!(quote_projection.text, "> > item");
+    }
+
+    #[test]
+    fn stable_projection_reveals_only_an_empty_inline_group() {
+        let empty = "**";
+        let doc = MarkdownDocument::from_text(empty);
+        let blocks = doc.visual_blocks();
+        let block = &blocks[0];
+        let between = 1;
+        let shown = build_visual_projection_with_marked_range(
+            empty,
+            block,
+            between..between,
+            between,
+            None,
+            false,
+        );
+        assert!(
+            shown.text.contains('*'),
+            "empty auto-pair stays visible, got {:?}",
+            shown.text
+        );
+
+        let filled = "**a**";
+        let filled_doc = MarkdownDocument::from_text(filled);
+        let filled_blocks = filled_doc.visual_blocks();
+        let filled_block = &filled_blocks[0];
+        let inside = filled.find('a').unwrap();
+        let hidden = build_visual_projection_with_marked_range(
+            filled,
+            filled_block,
+            inside..inside,
+            inside,
+            None,
+            false,
+        );
+        assert_eq!(hidden.text, "a");
+        assert!(hidden.revealed_source_ranges.is_empty());
+
+        let marked = inside..inside + 1;
+        let composed = build_visual_projection_with_marked_range(
+            filled,
+            filled_block,
+            0..0,
+            0,
+            Some(marked),
+            false,
+        );
+        assert_eq!(composed.text, "a");
+        assert!(composed.revealed_source_ranges.is_empty());
+    }
+
+    #[test]
+    fn stable_projection_keeps_inline_images_rendered() {
+        for source in [
+            "hello ![alt](url) world",
+            "hello <img src=\"a.png\" alt=\"alt\"> world",
+        ] {
+            let doc = MarkdownDocument::from_text(source);
+            let block = doc
+                .visual_blocks()
+                .into_iter()
+                .find(|block| {
+                    block
+                        .editable_runs
+                        .iter()
+                        .any(|run| run.html_image.is_some())
+                })
+                .unwrap_or_else(|| panic!("image atom missing in {source}"));
+            let cursor = source.find("alt").unwrap();
+            let projection = build_visual_projection_with_marked_range(
+                source,
+                &block,
+                cursor..cursor,
+                cursor,
+                None,
+                false,
+            );
+            assert!(
+                projection.revealed_source_ranges.iter().all(|range| {
+                    let slice = &source[range.clone()];
+                    !slice.contains("![") && !slice.contains("<img")
+                }),
+                "{source:?} spliced image source {:?}",
+                projection
+                    .revealed_source_ranges
+                    .iter()
+                    .map(|range| &source[range.clone()])
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                projection.spans.iter().any(|span| !span.source),
+                "image stays a rendered span in {source:?}"
+            );
+            assert!(projection.text.contains("hello"));
+            assert!(projection.text.contains("world"));
+        }
     }
 
     #[test]
@@ -7697,7 +7939,7 @@ Reference-style links work too: [Markion repository][markion-repo].\n\n\
         let doc = MarkdownDocument::from_text(source);
         let blocks = doc.visual_blocks_shared();
         let projection =
-            build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 0, None);
+            build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 0, None, true);
         assert_eq!(projection.text, "one\ntwo");
         // The break is one display char mapped onto the tag bytes, so the
         // boundaries on both sides resolve to the tag's source edges and no
@@ -7711,7 +7953,8 @@ Reference-style links work too: [Markion repository][markion-repo].\n\n\
         // Mid-tag source offsets clamp to the atom's display end.
         assert_eq!(projection.display_for_source(5), Some(4));
         // Activating the tag boundary reveals the authored source in place.
-        let revealed = build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 3, None);
+        let revealed =
+            build_visual_projection_with_marked_range(source, &blocks[0], 0..0, 3, None, true);
         assert_eq!(revealed.text, "one<br>two");
     }
 
@@ -7756,10 +7999,12 @@ Reference-style links work too: [Markion repository][markion-repo].\n\n\
         assert_eq!(markers, vec!["<em>", "</em>"]);
         // Unfocused projection hides the tags; a caret inside the element
         // reveals the complete authored source in place.
-        let unfocused = build_visual_projection_with_marked_range(source, block, 0..0, 0, None);
+        let unfocused =
+            build_visual_projection_with_marked_range(source, block, 0..0, 0, None, true);
         assert_eq!(unfocused.text, "text em more");
         let em_byte = source.find("em>").unwrap() + 2;
-        let focused = build_visual_projection_with_marked_range(source, block, 0..0, em_byte, None);
+        let focused =
+            build_visual_projection_with_marked_range(source, block, 0..0, em_byte, None, true);
         assert_eq!(focused.text, "text <em>em</em> more");
     }
 

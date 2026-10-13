@@ -1291,6 +1291,7 @@ impl Element for VisualEditableText {
                 } else {
                     app.move_to(source, cx);
                     app.active_tab_mut().set_visual_caret_affinity(affinity);
+                    app.open_stable_token_at(source, cx);
                 }
             });
             window.refresh();
@@ -2899,6 +2900,7 @@ pub(super) fn visual_text_element(
         source_selection.clone(),
         source_cursor,
         marked_range.clone(),
+        !app.stable_visual_inline,
     );
     let mut highlights = visual_projection_highlights(&projection, marked_range.as_ref());
     if app.search_visible {
@@ -2970,6 +2972,7 @@ pub(super) fn visual_text_element(
 fn visual_math_hit_target(
     source_range: Range<usize>,
     boundary: usize,
+    open_editor: bool,
     cx: &mut Context<MarkionApp>,
 ) -> Div {
     div()
@@ -2993,6 +2996,9 @@ fn visual_math_hit_target(
                     app.select_to(boundary, cx);
                 } else {
                     app.move_to(boundary, cx);
+                    if open_editor {
+                        app.open_inline_math_editor(source_range.clone(), cx);
+                    }
                 }
             }),
         )
@@ -3014,6 +3020,7 @@ fn visual_math_atom(
     image: Arc<MathImage>,
     source_range: Range<usize>,
     inline_metrics: Option<(f32, f32)>,
+    open_editor: bool,
     cx: &mut Context<MarkionApp>,
 ) -> gpui::AnyElement {
     let selected = {
@@ -3058,11 +3065,13 @@ fn visual_math_atom(
                 .child(visual_math_hit_target(
                     source_range.clone(),
                     source_range.start,
+                    open_editor,
                     cx,
                 ))
                 .child(visual_math_hit_target(
                     source_range.clone(),
                     source_range.end,
+                    open_editor,
                     cx,
                 )),
         )
@@ -3158,11 +3167,13 @@ fn visual_html_image_atom(
                 .child(visual_math_hit_target(
                     source_range.clone(),
                     source_range.start,
+                    false,
                     cx,
                 ))
                 .child(visual_math_hit_target(
                     source_range.clone(),
                     source_range.end,
+                    false,
                     cx,
                 )),
         )
@@ -3299,6 +3310,7 @@ pub(super) fn visual_text_with_math_element(
         app.active_tab().selected_range.clone(),
         app.active_tab().cursor_offset(),
         app.active_tab().marked_range.clone(),
+        !app.stable_visual_inline,
     );
     #[cfg(test)]
     let focused_test_projection = visual_block_is_focused(app, block).then(|| {
@@ -3357,6 +3369,7 @@ pub(super) fn visual_text_with_math_element(
                     image,
                     math.source_range.clone(),
                     Some(inline_metrics),
+                    app.stable_visual_inline && math.style == MathLayoutStyle::Text,
                     cx,
                 ),
             );
@@ -3646,6 +3659,9 @@ fn emit_navigation_icons_after(
     let mut emitted = 0usize;
     while let Some(pos) = remaining.iter().position(|(after, _)| *after == source_end) {
         let (_, target) = remaining.remove(pos);
+        let edit_offset = source_end.saturating_sub(1);
+        let edit_link =
+            app.stable_visual_inline && matches!(target, VisualNavigationTarget::Url(_));
         children.push(visual_navigation_icon(
             block_index,
             fragment_index + emitted,
@@ -3654,6 +3670,16 @@ fn emit_navigation_icons_after(
             cx,
         ));
         emitted += 1;
+        if edit_link {
+            children.push(visual_link_edit_icon(
+                block_index,
+                fragment_index + emitted,
+                edit_offset,
+                app,
+                cx,
+            ));
+            emitted += 1;
+        }
     }
     emitted
 }
@@ -3707,6 +3733,49 @@ fn visual_navigation_icon(
             }),
         )
         .child(glyph)
+        .into_any_element()
+}
+
+fn visual_link_edit_icon(
+    block_index: usize,
+    fragment_index: usize,
+    offset: usize,
+    app: &MarkionApp,
+    cx: &mut Context<MarkionApp>,
+) -> gpui::AnyElement {
+    let element_id = ElementId::from(("visual-link-edit", block_index * 10_000 + fragment_index));
+    div()
+        .id(element_id)
+        .ml(px(1.))
+        .mr(px(1.))
+        .px(px(3.))
+        .rounded_sm()
+        .text_size(px(11.))
+        .line_height(px(14.))
+        .text_color(rgb(PREVIEW_LINK_COLOR))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgba(0x2563eb22)))
+        .tooltip({
+            let palette = app.palette();
+            let label = app.tr(Msg::VisualInlineEditLink).to_string();
+            move |_, cx| {
+                cx.new(|_| FootnoteTooltip {
+                    palette,
+                    text: label.clone().into(),
+                })
+                .into()
+            }
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |app, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let focus_handle = app.focus_handle.clone();
+                window.focus(&focus_handle);
+                app.open_link_editor_at(offset, cx);
+            }),
+        )
+        .child("✎")
         .into_any_element()
 }
 
@@ -5941,6 +6010,7 @@ fn visual_math_editor(
                     image,
                     block.source_range.clone(),
                     None,
+                    false,
                     cx,
                 ))
         }
@@ -6345,7 +6415,8 @@ fn visual_collapsible_source_block(
     let caret_in_payload =
         payload.source_range.contains(&cursor) || cursor == payload.source_range.end;
     let user_expanded = tab.is_visual_source_expanded(block_id);
-    let show_payload = forced || user_expanded || caret_in_payload;
+    let caret_opens_payload = caret_in_payload && !(payload_first && app.stable_visual_inline);
+    let show_payload = forced || user_expanded || caret_opens_payload;
     let show_toggle = forced
         || user_expanded
         || caret_in_payload

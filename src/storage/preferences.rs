@@ -86,6 +86,8 @@ struct PreferencesFile {
     sync_scroll: bool,
     #[serde(deserialize_with = "deserialize_bool_or_false")]
     show_hidden_files: bool,
+    #[serde(deserialize_with = "deserialize_bool_or_false")]
+    stable_visual_inline: bool,
     #[serde(deserialize_with = "deserialize_bool_or_true")]
     open_in_current_tab: bool,
     #[serde(deserialize_with = "deserialize_bool_or_true")]
@@ -453,6 +455,7 @@ impl From<&AppPreferences> for PreferencesFile {
             heading_menu_max_level: preferences.heading_menu_max_level,
             sync_scroll: preferences.sync_scroll,
             show_hidden_files: preferences.show_hidden_files,
+            stable_visual_inline: preferences.stable_visual_inline,
             open_in_current_tab: preferences.open_in_current_tab,
             markdown_auto_pair: preferences.markdown_auto_pair,
             sidebar_visible: preferences.sidebar_visible,
@@ -518,6 +521,7 @@ impl From<PreferencesFile> for AppPreferences {
             heading_menu_max_level: normalize_heading_menu_max_level(file.heading_menu_max_level),
             sync_scroll: file.sync_scroll,
             show_hidden_files: file.show_hidden_files,
+            stable_visual_inline: file.stable_visual_inline,
             open_in_current_tab: file.open_in_current_tab,
             markdown_auto_pair: file.markdown_auto_pair,
             sidebar_visible: file.sidebar_visible,
@@ -1199,6 +1203,43 @@ mod tests {
         let text = "theme = \"Paper\"\nshow_hidden_files = \"yes\"\n";
         let parsed = parse_app_preferences(text).unwrap();
         assert!(!parsed.show_hidden_files);
+    }
+
+    #[test]
+    fn stable_visual_inline_defaults_to_false() {
+        assert!(!AppPreferences::default().stable_visual_inline);
+    }
+
+    #[test]
+    fn stable_visual_inline_round_trips_through_toml() {
+        let preferences = AppPreferences {
+            stable_visual_inline: true,
+            ..AppPreferences::default()
+        };
+        let rendered = render_app_preferences(&preferences);
+        assert!(
+            rendered.contains("stable_visual_inline = true"),
+            "rendered TOML should set stable_visual_inline = true: {rendered}"
+        );
+        let parsed = parse_app_preferences(&rendered).unwrap();
+        assert!(
+            parsed.stable_visual_inline,
+            "parsed stable_visual_inline should be true"
+        );
+    }
+
+    #[test]
+    fn missing_stable_visual_inline_falls_back_to_false() {
+        let text = "theme = \"Paper\"\nlanguage = \"en\"\n";
+        let parsed = parse_app_preferences(text).unwrap();
+        assert!(!parsed.stable_visual_inline);
+    }
+
+    #[test]
+    fn invalid_stable_visual_inline_value_falls_back_to_false() {
+        let text = "theme = \"Paper\"\nstable_visual_inline = \"yes\"\n";
+        let parsed = parse_app_preferences(text).unwrap();
+        assert!(!parsed.stable_visual_inline);
     }
 
     #[test]
