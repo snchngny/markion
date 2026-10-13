@@ -2483,6 +2483,7 @@ pub(super) fn search_field_view(
             "git-message-field",
             "git-author-field",
             "git-email-field",
+            "git-file-types-field",
         ][index],
         SearchField::GitSetup(index) => [
             "git-setup-remote-field",
@@ -2504,6 +2505,7 @@ pub(super) fn search_field_view(
                 "git-message-field",
                 "git-author-field",
                 "git-email-field",
+                "git-file-types-field",
             ][index],
             SearchField::GitSetup(index) => [
                 "git-setup-remote-field",
