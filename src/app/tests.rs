@@ -11471,10 +11471,13 @@ fn visual_edit_end_padding_is_presentation_only_and_places_eof_caret(cx: &mut Te
             "visual-document-end-padding".to_string(),
         ))
         .expect("document-end padding should be painted");
-    let expected = visual_end_padding_height(viewport_height);
+    let caret_half_line = app.update(cx, |app, _| {
+        px(app.typography_metrics().paragraph_line_height * 0.5)
+    });
+    let expected = visual_end_padding_height(viewport_height) + caret_half_line;
     assert!(
         (f32::from(padding.size.height) - f32::from(expected)).abs() < 8.,
-        "end padding {padding:?} should be about half the viewport {viewport_height:?} (expected {expected:?})"
+        "end padding {padding:?} should be about half the viewport plus half a caret line {viewport_height:?} (expected {expected:?})"
     );
 
     let scroll_before = app.update(cx, |app, _| {

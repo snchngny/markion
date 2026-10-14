@@ -4416,12 +4416,16 @@ pub(super) fn visual_end_padding_view(
     app: &MarkionApp,
     cx: &mut Context<MarkionApp>,
 ) -> Stateful<Div> {
+    // The caret on the document-end insertion row hangs half a line below
+    // that zero-height row, so the trailing spacer must reach half a line
+    // beyond viewport/2 for typewriter centering to be scroll-reachable.
     let height = app
         .active_tab()
         .visual_end_padding_height
         .unwrap_or_else(|| {
             visual_end_padding_height(app.active_tab().visual_list.viewport_bounds().size.height)
-        });
+        })
+        + px(app.typography_metrics().paragraph_line_height * 0.5);
     div()
         .id("visual-document-end-padding")
         .debug_selector(|| "visual-document-end-padding".to_string())
