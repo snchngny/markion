@@ -1811,6 +1811,8 @@ fn token_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
         TokenEditorKind::Raw => app.tr(Msg::VisualInlineSourceLabel),
     };
     let draft = editor.draft.clone();
+    let cursor = editor.cursor;
+    let anchor = editor.anchor;
     div()
         .absolute()
         .top(px(62.))
@@ -1825,6 +1827,15 @@ fn token_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
         .flex()
         .flex_col()
         .gap_2()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_down_out(cx.listener(|app, _: &MouseDownEvent, _, cx| {
+            if app.token_editor.take().is_some() {
+                app.input_marked_len = 0;
+                cx.notify();
+            }
+        }))
         .child(
             div()
                 .text_size(px(14.))
@@ -1843,11 +1854,18 @@ fn token_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
                         .text_color(rgb(0x64748b))
                         .child(field_label),
                 )
-                .child(div().mt_1().text_size(px(13.)).child(if draft.is_empty() {
-                    " ".to_string()
-                } else {
-                    draft
-                })),
+                .child(overlay_caret_value(
+                    "token-editor-text",
+                    &draft,
+                    cursor,
+                    anchor,
+                    true,
+                    OverlayTextDrag::Token,
+                    |app, offset, extend, clicks, cx| {
+                        app.place_token_editor_caret(offset, extend, clicks, cx);
+                    },
+                    cx,
+                )),
         )
         .child(
             div()
@@ -1873,6 +1891,144 @@ fn token_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
                         .on_click(cx.listener(|app, _, _, cx| app.confirm_token_editor(cx))),
                 ),
         )
+}
+
+/// One line of an overlay editor: the value, a caret or selection, and a click
+/// that maps the pointer to a byte offset in that value.
+fn overlay_caret_value(
+    id: &'static str,
+    value: &str,
+    cursor: usize,
+    anchor: usize,
+    active: bool,
+    drag: OverlayTextDrag,
+    on_place: impl Fn(&mut MarkionApp, usize, bool, usize, &mut Context<MarkionApp>) + 'static,
+    cx: &mut Context<MarkionApp>,
+) -> Stateful<Div> {
+    let selection = if active {
+        let cursor = cursor.min(value.len());
+        let anchor = anchor.min(value.len());
+        cursor.min(anchor)..cursor.max(anchor)
+    } else {
+        value.len()..value.len()
+    };
+    let before = value.get(..selection.start).unwrap_or("").to_string();
+    let selected = value.get(selection.clone()).unwrap_or("").to_string();
+    let after = value.get(selection.end..).unwrap_or("").to_string();
+    let show_caret = active && selected.is_empty();
+    let show_selection = active && !selected.is_empty();
+    let text_metrics: Rc<RefCell<Option<(Pixels, Font)>>> = Rc::new(RefCell::new(None));
+    let metrics_for_click = text_metrics.clone();
+    let buffer_for_click = value.to_string();
+    let app_entity = cx.entity();
+    let drag_entity = app_entity.clone();
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .mt_1()
+        .relative()
+        .text_size(px(13.))
+        .cursor(CursorStyle::IBeam)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .child(
+                    div().child(if before.is_empty() && !show_caret && after.is_empty() {
+                        " ".to_string()
+                    } else {
+                        before
+                    }),
+                )
+                .when(show_selection, |row| {
+                    row.child(div().bg(rgba(0x2563eb30)).child(selected))
+                })
+                .when(show_caret, |row| {
+                    row.child(div().w(px(1.5)).h(px(14.)).bg(rgb(0x2563eb)))
+                })
+                .child(div().child(after))
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let font = window.text_style().font();
+                            *text_metrics.borrow_mut() = Some((bounds.left(), font.clone()));
+                            let move_entity = drag_entity.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseMoveEvent, phase, window, cx| {
+                                    if phase != DispatchPhase::Bubble || !event.dragging() {
+                                        return;
+                                    }
+                                    move_entity.update(cx, |app, cx| {
+                                        if app.overlay_text_drag != Some(drag) {
+                                            return;
+                                        }
+                                        let buffer = match drag {
+                                            OverlayTextDrag::Token => app
+                                                .token_editor
+                                                .as_ref()
+                                                .map(|editor| editor.draft.clone())
+                                                .unwrap_or_default(),
+                                            OverlayTextDrag::Link(field) => app
+                                                .link_editor
+                                                .as_ref()
+                                                .map(|editor| match field {
+                                                    LinkEditorField::Label => editor.label.clone(),
+                                                    LinkEditorField::Url => editor.url.clone(),
+                                                    LinkEditorField::Title => editor.title.clone(),
+                                                })
+                                                .unwrap_or_default(),
+                                        };
+                                        let offset = search_field_offset_at(
+                                            window,
+                                            &font,
+                                            &buffer,
+                                            event.position.x - bounds.left(),
+                                            px(13.),
+                                        );
+                                        app.drag_overlay_caret(drag, offset, cx);
+                                    });
+                                },
+                            );
+                            let up_entity = drag_entity.clone();
+                            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Bubble
+                                    && event.button == MouseButton::Left
+                                {
+                                    up_entity.update(cx, |app, _| {
+                                        if app.overlay_text_drag == Some(drag) {
+                                            app.overlay_text_drag = None;
+                                        }
+                                    });
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+        )
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            cx.stop_propagation();
+            let offset = match metrics_for_click.borrow().as_ref() {
+                Some((origin_x, font)) => search_field_offset_at(
+                    window,
+                    font,
+                    &buffer_for_click,
+                    event.position.x - *origin_x,
+                    px(13.),
+                ),
+                None => 0,
+            };
+            app_entity.update(cx, |app, cx| {
+                window.focus(&app.focus_handle);
+                app.overlay_text_drag = (event.click_count < 2).then_some(drag);
+                on_place(app, offset, event.modifiers.shift, event.click_count, cx);
+            });
+        })
 }
 
 fn link_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
@@ -1915,12 +2071,22 @@ fn link_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
                     .text_color(rgb(0x64748b))
                     .child(label),
             )
-            .child(
-                div()
-                    .mt_1()
-                    .text_size(px(13.))
-                    .child(if value.is_empty() { " " } else { value }.to_string()),
-            )
+            .child(overlay_caret_value(
+                match kind {
+                    LinkEditorField::Label => "link-editor-label-text",
+                    LinkEditorField::Url => "link-editor-url-text",
+                    LinkEditorField::Title => "link-editor-title-text",
+                },
+                value,
+                if active { editor.cursor } else { value.len() },
+                if active { editor.anchor } else { value.len() },
+                active,
+                OverlayTextDrag::Link(kind),
+                move |app, offset, extend, clicks, cx| {
+                    app.place_link_editor_caret(kind, offset, extend, clicks, cx);
+                },
+                cx,
+            ))
     };
     div()
         .absolute()
@@ -1936,6 +2102,9 @@ fn link_editor_view(app: &MarkionApp, cx: &mut Context<MarkionApp>) -> Div {
         .flex()
         .flex_col()
         .gap_2()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
         .child(
             div()
                 .text_size(px(14.))
@@ -2576,6 +2745,7 @@ pub(super) fn search_field_view(
                                             &font,
                                             &field.buffer,
                                             event.position.x - bounds.left(),
+                                            px(12.),
                                         );
                                         if field.cursor != offset {
                                             field.cursor = offset;
@@ -2634,6 +2804,7 @@ pub(super) fn search_field_view(
                     font,
                     &buffer_for_click,
                     event.position.x - *origin_x,
+                    px(12.),
                 ),
                 None => {
                     let Some(bounds) = bounds_for_click.borrow().as_ref().copied() else {
@@ -2685,7 +2856,13 @@ pub(super) fn search_field_view(
 
 /// The byte offset in a single-line field's `buffer` closest to `x`, measured
 /// from the first glyph with the field's real shaped text.
-fn search_field_offset_at(window: &Window, font: &Font, buffer: &str, x: Pixels) -> usize {
+fn search_field_offset_at(
+    window: &Window,
+    font: &Font,
+    buffer: &str,
+    x: Pixels,
+    font_size: Pixels,
+) -> usize {
     if buffer.is_empty() {
         return 0;
     }
@@ -2699,7 +2876,7 @@ fn search_field_offset_at(window: &Window, font: &Font, buffer: &str, x: Pixels)
     };
     let index = window
         .text_system()
-        .layout_line(buffer, px(12.), &[run], None)
+        .layout_line(buffer, font_size, &[run], None)
         .closest_index_for_x(x);
     clamp_search_boundary(buffer, index)
 }

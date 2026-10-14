@@ -1212,7 +1212,7 @@ When Visual Edit lays out a prose row as mixed fragments (because the row contai
 #### Scenario: Consecutive source lines with a link stay stacked
 - **WHEN** a paragraph (or heading / list item / quoted leaf) is written as consecutive source lines with no blank separator, at least one of those lines contains a Markdown link, and Visual Edit is active
 - **THEN** each authored line renders on its own visual row rather than joining into a single line
-- **AND** the link keeps its rendered label and navigation icon on the line that owns the link
+- **AND** the link keeps its rendered label on the line that owns the link
 
 #### Scenario: Hard breaks still break in mixed layout
 - **WHEN** a mixed-fragment prose row contains a Markdown hard break (two trailing spaces or a backslash before the newline)
@@ -1221,7 +1221,7 @@ When Visual Edit lays out a prose row as mixed fragments (because the row contai
 #### Scenario: Single-line mixed prose is unchanged
 - **WHEN** a mixed-fragment prose row contains no authored line break
 - **THEN** its fragments continue to wrap as one flowing paragraph
-- **AND** navigation icons and inline atoms stay on that same flow
+- **AND** inline atoms stay on that same flow
 
 ### Requirement: WYSIWYG coverage roadmap
 The repository SHALL maintain, as part of the Visual Edit WYSIWYG coverage matrix, a prioritized roadmap of every Markdown construct that is currently classified as a WYSIWYG coverage gap. The roadmap SHALL name, for each gap, the construct, its current rendering (transitional source view), its target WYSIWYG class (rendered or progressive-reveal), its priority, its rough implementation effort, and the implementation seam in the existing code. The roadmap SHALL be closed incrementally by future changes, each of which SHALL move one or more constructs out of the gap class and update this roadmap. After this change the remaining primary gap SHALL be multiline or otherwise unprovable images. The roadmap SHALL also track residual unsupported gap bytes as a secondary gap. YAML front matter, reference-style block images, ragged tables, math Pending/Error states, indented code blocks, unclosed or malformed fenced code, and definition lists SHALL NOT remain on the roadmap. Task-list checkbox click interaction SHALL NOT remain on the roadmap once Visual Edit checkboxes are clickable.
@@ -1430,7 +1430,7 @@ The editor SHALL treat a standalone paragraph whose trimmed plaintext is exactly
 - **AND** they do not replace the item with a generated outline
 
 ### Requirement: Footnote reference hover preview
-The editor SHALL show a presentation-only tooltip with the matching footnote definition text when the pointer hovers a resolved footnote reference in Read, Split Preview, or Visual Edit. Hovering SHALL NOT mutate document text, dirty state, undo history, or document version. Unresolved footnote labels SHALL omit the tooltip. Clicking an existing Visual Edit footnote navigation icon SHALL continue to jump to the definition.
+The editor SHALL show a presentation-only tooltip with the matching footnote definition text when the pointer hovers a resolved footnote reference in Read, Split Preview, or Visual Edit. Hovering SHALL NOT mutate document text, dirty state, undo history, or document version. Unresolved footnote labels SHALL omit the tooltip. In Visual Edit, holding the platform secondary modifier and clicking the footnote label SHALL jump to the definition.
 
 #### Scenario: Hovering a resolved footnote shows its definition
 - **WHEN** the document defines `[^note]` and the pointer hovers a `[^note]` reference in Read, Split Preview, or Visual Edit
@@ -1442,7 +1442,7 @@ The editor SHALL show a presentation-only tooltip with the matching footnote def
 - **THEN** the editor does not show a footnote tooltip
 
 ### Requirement: In-document heading anchor navigation
-The editor SHALL resolve bare Markdown link destinations of the form `#fragment` to a document heading. A successful match SHALL jump to that heading the same way the outline panel does, without calling the platform URL opener and without mutating source. Visual Edit SHALL attach a heading navigation target (and icon) to such links when the heading exists. Links that are not a bare `#fragment`, or whose fragment matches no heading, SHALL keep existing URL-open behavior. Heading ids SHALL prefer an authored heading attribute `{#id}` when present; otherwise they SHALL slugify the heading title keeping Unicode letters and digits, and duplicate ids SHALL uniquify with a numeric suffix (`hello`, then `hello-1`).
+The editor SHALL resolve bare Markdown link destinations of the form `#fragment` to a document heading. A successful match SHALL jump to that heading the same way the outline panel does, without calling the platform URL opener and without mutating source. Visual Edit SHALL attach a heading navigation target to such links when the heading exists, and SHALL NOT paint a separate open icon for it. Links that are not a bare `#fragment`, or whose fragment matches no heading, SHALL keep existing URL-open behavior. Heading ids SHALL prefer an authored heading attribute `{#id}` when present; otherwise they SHALL slugify the heading title keeping Unicode letters and digits, and duplicate ids SHALL uniquify with a numeric suffix (`hello`, then `hello-1`).
 
 #### Scenario: Hash link jumps to the heading
 - **WHEN** the document contains `## Hello` and a link `[go](#hello)`
@@ -1622,22 +1622,23 @@ The editor SHALL bind the Redo action exactly once using the platform-mapped `se
 - **THEN** the existing redo history operation and status feedback are used
 
 ### Requirement: Visual Edit link and footnote navigation icons
-Visual Edit SHALL attach a resolved navigation target to each actionable inline link run (including reference-style links whose destination was resolved from document-scoped definitions) and each footnote reference run. Visual Edit SHALL render a compact clickable icon immediately after the construct's rendered label. Clicking the icon SHALL navigate without mutating document text: for a URL target the editor SHALL open the destination with the platform URL opener; for a footnote reference the editor SHALL move the source caret to the matching footnote definition block and scroll that block into view. Clicking the rendered label text SHALL continue to update the source selection for editing and SHALL NOT open the destination. Constructs without a resolvable destination SHALL omit the icon.
+Visual Edit SHALL attach a resolved navigation target to each actionable inline link run (including reference-style links and bare `#fragment` heading links whose destination was resolved) and each footnote reference run. Visual Edit SHALL NOT paint an open icon after those labels. Holding the platform secondary modifier (Ctrl on Windows and Linux, Cmd on macOS) and clicking the rendered label SHALL navigate without mutating document text: for a URL target the editor SHALL open the destination with the platform URL opener; for a heading target the editor SHALL jump to that heading; for a footnote reference the editor SHALL move the source caret to the matching footnote definition block and scroll that block into view. A click without that modifier SHALL update the source selection for editing and SHALL NOT open the destination. Constructs without a resolvable destination SHALL stay non-navigable.
 
-#### Scenario: Inline and reference-style links expose an open icon
-- **WHEN** a Visual Edit prose block contains an inline link or a resolved reference-style link
-- **THEN** a navigation icon is shown after the link label
-- **AND** clicking the icon opens the resolved URL
-- **AND** clicking the label places or extends the source selection without opening the URL
+#### Scenario: Inline and reference-style links open with the secondary modifier
+- **WHEN** a Visual Edit prose block contains an inline link, a resolved reference-style link, or a bare `#fragment` heading link
+- **THEN** no open icon is shown after the link label
+- **AND** clicking the label with the platform secondary modifier held opens the resolved destination
+- **AND** clicking the label without that modifier places or extends the source selection without opening the destination
 
 #### Scenario: Footnote reference jumps to its definition
 - **WHEN** a Visual Edit prose block contains a footnote reference whose definition exists in the document
-- **THEN** a navigation icon is shown after the superscript footnote label
-- **AND** clicking the icon moves the caret to the footnote definition block and scrolls it into view
+- **THEN** no jump icon is shown after the superscript footnote label
+- **AND** hovering the label still shows the definition tooltip
+- **AND** clicking the label with the platform secondary modifier held moves the caret to the footnote definition block and scrolls it into view
 
 #### Scenario: Unresolved constructs stay non-navigable
 - **WHEN** bracketed text does not resolve to a link or footnote reference
-- **THEN** Visual Edit does not show a navigation icon for that text
+- **THEN** Visual Edit does not navigate when that text is clicked, with or without the secondary modifier
 
 ### Requirement: Visual Edit footnote and link-definition fidelity
 Visual Edit SHALL resolve footnote references against document-scoped footnote definitions during per-block inline parsing, rendering an unfocused footnote reference as superscript visible text without exposing the surrounding `[^` `]` markers as literal runs. Visual Edit SHALL present each footnote definition as a single source-backed block whose range covers the authored `[^label]:` marker and its definition body, and SHALL NOT split the marker into an Unsupported source island while emitting the body as an ordinary paragraph. Gaps that contain only link reference definition lines (`[label]: url`) SHALL remain source-backed and editable, and SHALL NOT be classified as Unsupported source islands with island chrome; fenced-code lines shaped like definitions remain excluded from definition collection.
@@ -2437,9 +2438,9 @@ An inline group whose visible text is empty and that contains the caret or the I
 
 While the preference is on, non-visible source SHALL be edited only through surfaces that do not participate in line breaking:
 
-- A Markdown link, a reference-style link, an angle-bracket autolink, or a simple HTML anchor (`<a>` with only `href` and an optional `title`, text content, and no nested tags) SHALL open the link editor from the Insert Link command or from an explicit edit affordance drawn outside the text flow. Arrowing through the link or clicking its label SHALL place the caret and SHALL NOT open the editor. Clicking the existing navigation icon SHALL still open the resolved destination. Confirming a Markdown link SHALL write one Markdown link. Confirming a simple HTML anchor SHALL write an HTML anchor of the same shape and SHALL NOT rewrite it as Markdown.
-- Inline math SHALL stay a rendered atom. A pointer click on that atom SHALL open a floating payload editor for the delimiter-free formula. Confirming SHALL replace the payload inside the existing delimiters as one source edit.
-- An escape, a decoded entity, an emoji shortcode, a `<br>`, or any other supported inline-HTML element that is not a simple anchor SHALL stay rendered. A pointer click on that atom SHALL open a floating editor containing the exact authored token. Confirming SHALL replace that exact source range. Backspace or Delete on an escape, entity, emoji shortcode, or `<br>` atom SHALL remove the whole authored token in one source edit.
+- A Markdown link, a reference-style link, an angle-bracket autolink, or a simple HTML anchor (`<a>` with only `href` and an optional `title`, text content, and no nested tags) SHALL open the link editor from the Insert Link command or from an explicit edit affordance drawn outside the text flow. Arrowing through the link or clicking its label SHALL place the caret and SHALL NOT open the editor. Holding the platform secondary modifier and clicking the label SHALL open the resolved destination. Visual Edit SHALL NOT paint a separate open icon after the link label. Confirming a Markdown link SHALL write one Markdown link. Confirming a simple HTML anchor SHALL write an HTML anchor of the same shape and SHALL NOT rewrite it as Markdown.
+- Inline math SHALL stay a rendered atom. A pointer click on that atom SHALL open a floating payload editor for the delimiter-free formula. Confirming SHALL replace the payload inside the existing delimiters as one source edit. A pointer click outside that editor SHALL dismiss it without changing document text or version.
+- An escape, a decoded entity, an emoji shortcode, a `<br>`, or any other supported inline-HTML element that is not a simple anchor SHALL stay rendered. A pointer click on that atom SHALL open a floating editor containing the exact authored token. Confirming SHALL replace that exact source range. A pointer click outside that editor SHALL dismiss it without changing document text or version. Backspace or Delete on an escape, entity, emoji shortcode, or `<br>` atom SHALL remove the whole authored token in one source edit.
 - Emphasis, strong, strikethrough, inline code, highlight, superscript, and subscript SHALL stay styled. Their visible characters SHALL remain editable through the display-to-source mapping. Adding or removing their markers SHALL stay on the existing format commands.
 - Inline images SHALL NOT splice their tag or `![...](...)` source into the line on caret entry. The existing image source toggle SHALL remain the control that shows that source.
 

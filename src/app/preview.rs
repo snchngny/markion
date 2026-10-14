@@ -1284,9 +1284,16 @@ impl Element for VisualEditableText {
                 app.input_marked_len = 0;
                 app.active_tab_mut().clear_preview_selection();
                 app.active_tab_mut().is_selecting = true;
+                if app.token_editor.is_some() {
+                    app.cancel_token_editor(cx);
+                }
                 if event.modifiers.shift {
                     app.select_to(source, cx);
                     app.active_tab_mut().set_visual_caret_affinity(affinity);
+                } else if event.modifiers.secondary()
+                    && app.activate_visual_navigation_at(source, cx)
+                {
+                    app.active_tab_mut().is_selecting = false;
                 } else if let Some(range) = double_click_word {
                     // move_to_visual_editor_target clears caret affinity
                     // itself; a selection has no collapsed-affinity side.
@@ -3195,6 +3202,7 @@ fn visual_projection_fragment(
     pending_caret: &mut Option<usize>,
     navigation_active: bool,
     navigation_y_offset: Pixels,
+    footnote_label: Option<&str>,
     app: &MarkionApp,
     cx: &mut Context<MarkionApp>,
     #[cfg(test)] test_projection: Option<(String, Vec<Range<usize>>)>,
@@ -3212,7 +3220,7 @@ fn visual_projection_fragment(
     let highlights = style
         .map(|style| vec![(0..visible_len, style)])
         .unwrap_or_default();
-    VisualEditableText {
+    let element = VisualEditableText {
         element_id: ElementId::from(SharedString::from(format!(
             "visual-mixed-{block_index}-{fragment_index}"
         ))),
@@ -3243,7 +3251,16 @@ fn visual_projection_fragment(
         #[cfg(test)]
         test_projection_styles,
     }
-    .into_any_element()
+    .into_any_element();
+    with_footnote_tooltip(
+        app,
+        footnote_label,
+        element,
+        ElementId::from((
+            "visual-footnote-hover",
+            block_index * 10_000 + fragment_index,
+        )),
+    )
 }
 
 /// Source-backed mixed layout for Visual Edit. A focused formula is already a
@@ -3251,8 +3268,9 @@ fn visual_projection_fragment(
 /// atoms while adjacent prose keeps exact visible-to-source segments.
 /// Inline raw-HTML `<img>` tags render through the same mixed layout as
 /// image atoms, and focused tags reveal their authored source.
-/// When the block has link/footnote navigation targets, the same flex-wrap
-/// layout inserts a compact clickable icon after each navigable construct.
+/// When inline syntax stays hidden, the same flex-wrap layout inserts a
+/// compact edit icon after each link. Open icons are not painted; Ctrl/Cmd-click
+/// on the label navigates.
 fn mixed_prose_current_line(lines: &mut Vec<Vec<gpui::AnyElement>>) -> &mut Vec<gpui::AnyElement> {
     if lines.is_empty() {
         lines.push(Vec::new());
@@ -3285,7 +3303,12 @@ pub(super) fn visual_text_with_math_element(
         .editable_runs
         .iter()
         .any(|run| run.html_image.is_some());
-    let nav_icons = visual_navigation_icons(block);
+    // Open icons are not painted. Link edit icons appear only while inline
+    // syntax stays hidden; Ctrl/Cmd-click opens every navigation target.
+    // Navigation targets still use the mixed row so authored line breaks stay
+    // stacked, matching the layout that used to host the open icon.
+    let has_navigation = block_has_inline_navigation(block);
+    let nav_icons = visual_navigation_icons(block, app.stable_visual_inline);
     // Reveal groups have already proven the tag syntax. Only authored HTML
     // breaks need explicit empty rows; ordinary prose keeps its shaped flow.
     let has_html_break = block.reveal_groups.iter().any(|group| {
@@ -3301,6 +3324,7 @@ pub(super) fn visual_text_with_math_element(
     if !has_math
         && !has_html_image
         && !has_html_break
+        && !has_navigation
         && nav_icons.is_empty()
         && !block
             .editable_runs
@@ -3473,6 +3497,7 @@ pub(super) fn visual_text_with_math_element(
                                     &mut pending_caret,
                                     true,
                                     navigation_y_offset,
+                                    visual_run_footnote_label(block, &source_range),
                                     app,
                                     cx,
                                     #[cfg(test)]
@@ -3535,6 +3560,7 @@ pub(super) fn visual_text_with_math_element(
                                 &mut pending_caret,
                                 true,
                                 navigation_y_offset,
+                                visual_run_footnote_label(block, &source_range),
                                 app,
                                 cx,
                                 #[cfg(test)]
@@ -3599,6 +3625,7 @@ pub(super) fn visual_text_with_math_element(
                     &mut pending_caret,
                     true,
                     Pixels::ZERO,
+                    None,
                     app,
                     cx,
                     #[cfg(test)]
@@ -3629,7 +3656,39 @@ pub(super) fn visual_text_with_math_element(
         .into_any_element()
 }
 
-fn visual_navigation_icons(block: &VisualBlock) -> Vec<(usize, VisualNavigationTarget)> {
+fn block_has_inline_navigation(block: &VisualBlock) -> bool {
+    block
+        .editable_runs
+        .iter()
+        .any(|run| match run.navigation.as_ref() {
+            Some(VisualNavigationTarget::Url(url)) => !url.trim().is_empty(),
+            Some(
+                VisualNavigationTarget::Heading { .. } | VisualNavigationTarget::Footnote { .. },
+            ) => true,
+            None => false,
+        })
+}
+
+fn visual_run_footnote_label<'a>(
+    block: &'a VisualBlock,
+    source_range: &std::ops::Range<usize>,
+) -> Option<&'a str> {
+    block.editable_runs.iter().find_map(|run| {
+        let VisualNavigationTarget::Footnote { label } = run.navigation.as_ref()? else {
+            return None;
+        };
+        let range = &run.content_range;
+        (source_range.start < range.end && source_range.end > range.start).then_some(label.as_str())
+    })
+}
+
+fn visual_navigation_icons(
+    block: &VisualBlock,
+    include_links: bool,
+) -> Vec<(usize, VisualNavigationTarget)> {
+    if !include_links {
+        return Vec::new();
+    }
     let mut icons = Vec::new();
     let mut index = 0usize;
     while index < block.editable_runs.len() {
@@ -3637,7 +3696,11 @@ fn visual_navigation_icons(block: &VisualBlock) -> Vec<(usize, VisualNavigationT
             index += 1;
             continue;
         };
-        if matches!(&nav, VisualNavigationTarget::Url(url) if url.trim().is_empty()) {
+        let is_link = matches!(
+            nav,
+            VisualNavigationTarget::Url(_) | VisualNavigationTarget::Heading { .. }
+        );
+        if !is_link || matches!(&nav, VisualNavigationTarget::Url(url) if url.trim().is_empty()) {
             index += 1;
             continue;
         }
@@ -3666,17 +3729,13 @@ fn emit_navigation_icons_after(
     while let Some(pos) = remaining.iter().position(|(after, _)| *after == source_end) {
         let (_, target) = remaining.remove(pos);
         let edit_offset = source_end.saturating_sub(1);
-        let edit_link =
-            app.stable_visual_inline && matches!(target, VisualNavigationTarget::Url(_));
-        children.push(visual_navigation_icon(
-            block_index,
-            fragment_index + emitted,
+        let is_link = matches!(
             target,
-            app,
-            cx,
-        ));
-        emitted += 1;
-        if edit_link {
+            VisualNavigationTarget::Url(_) | VisualNavigationTarget::Heading { .. }
+        );
+        // Open icons (↗ / # / ↓) sit in the reading line. Ctrl/Cmd-click on
+        // the label navigates; the edit icon is the only remaining chrome.
+        if is_link && app.stable_visual_inline {
             children.push(visual_link_edit_icon(
                 block_index,
                 fragment_index + emitted,
@@ -3688,58 +3747,6 @@ fn emit_navigation_icons_after(
         }
     }
     emitted
-}
-
-fn visual_navigation_icon(
-    block_index: usize,
-    fragment_index: usize,
-    target: VisualNavigationTarget,
-    app: &MarkionApp,
-    cx: &mut Context<MarkionApp>,
-) -> gpui::AnyElement {
-    let glyph = match &target {
-        VisualNavigationTarget::Url(_) => "↗",
-        VisualNavigationTarget::Footnote { .. } => "↓",
-        VisualNavigationTarget::Heading { .. } => "#",
-    };
-    let tooltip = match &target {
-        VisualNavigationTarget::Footnote { label } => footnote_tooltip_text(app, label),
-        _ => None,
-    };
-    let element_id = ElementId::from(("visual-nav-icon", block_index * 10_000 + fragment_index));
-    div()
-        .id(element_id)
-        .ml(px(2.))
-        .mr(px(1.))
-        .px(px(3.))
-        .rounded_sm()
-        .text_size(px(11.))
-        .line_height(px(14.))
-        .text_color(rgb(PREVIEW_LINK_COLOR))
-        .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(rgba(0x2563eb22)))
-        .when_some(tooltip, |icon, text| {
-            let palette = app.palette();
-            icon.tooltip(move |_, cx| {
-                cx.new(|_| FootnoteTooltip {
-                    palette,
-                    text: text.clone(),
-                })
-                .into()
-            })
-        })
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |app, _: &MouseDownEvent, window, cx| {
-                // Keep the surrounding prose hit-target from placing a caret.
-                cx.stop_propagation();
-                let focus_handle = app.focus_handle.clone();
-                window.focus(&focus_handle);
-                app.activate_visual_navigation(&target, cx);
-            }),
-        )
-        .child(glyph)
-        .into_any_element()
 }
 
 fn visual_link_edit_icon(
@@ -5657,6 +5664,7 @@ fn visual_editor_field_element(
                         true,
                         px(resolved_script_metrics(span.style, metrics, app, cx)
                             .map_or(0., |(_, _, top)| top)),
+                        span.footnote.as_deref(),
                         app,
                         cx,
                         #[cfg(test)]

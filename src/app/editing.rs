@@ -52,6 +52,148 @@ fn wrap_inline_math_payload(authored: &str, payload: &str) -> String {
     }
 }
 
+fn overlay_selection(text: &str, cursor: usize, anchor: usize) -> Range<usize> {
+    let len = text.len();
+    let cursor = cursor.min(len);
+    let anchor = anchor.min(len);
+    cursor.min(anchor)..cursor.max(anchor)
+}
+
+fn place_overlay_caret(
+    text: &str,
+    cursor: &mut usize,
+    anchor: &mut usize,
+    offset: usize,
+    extend: bool,
+    click_count: usize,
+) {
+    let offset = clamp_search_boundary(text, offset);
+    if click_count >= 3 {
+        *anchor = 0;
+        *cursor = text.len();
+    } else if click_count == 2 {
+        let word = search_word_range(text, offset);
+        *anchor = word.start;
+        *cursor = word.end;
+    } else {
+        *cursor = offset;
+        if !extend {
+            *anchor = offset;
+        }
+    }
+}
+
+fn move_overlay_buffer(
+    text: &mut String,
+    cursor: &mut usize,
+    anchor: &mut usize,
+    movement: SearchCaretMove,
+) {
+    *cursor = clamp_search_boundary(text, *cursor);
+    *anchor = clamp_search_boundary(text, *anchor);
+    let selection = overlay_selection(text, *cursor, *anchor);
+    match movement {
+        SearchCaretMove::Left => {
+            *cursor = if selection.is_empty() {
+                previous_search_boundary(text, *cursor)
+            } else {
+                selection.start
+            };
+            *anchor = *cursor;
+        }
+        SearchCaretMove::Right => {
+            *cursor = if selection.is_empty() {
+                next_search_boundary(text, *cursor)
+            } else {
+                selection.end
+            };
+            *anchor = *cursor;
+        }
+        SearchCaretMove::Home => {
+            *cursor = 0;
+            *anchor = 0;
+        }
+        SearchCaretMove::End => {
+            *cursor = text.len();
+            *anchor = *cursor;
+        }
+        SearchCaretMove::SelectLeft => {
+            *cursor = previous_search_boundary(text, *cursor);
+        }
+        SearchCaretMove::SelectRight => {
+            *cursor = next_search_boundary(text, *cursor);
+        }
+        SearchCaretMove::SelectAll => {
+            *anchor = 0;
+            *cursor = text.len();
+        }
+    }
+}
+
+fn insert_overlay_buffer(
+    text: &mut String,
+    cursor: &mut usize,
+    anchor: &mut usize,
+    marked: usize,
+    inserted: &str,
+) {
+    *cursor = clamp_search_boundary(text, *cursor);
+    *anchor = clamp_search_boundary(text, *anchor);
+    let selection = overlay_selection(text, *cursor, *anchor);
+    let composition_start = cursor.saturating_sub(marked.min(*cursor));
+    let start = composition_start.min(selection.start);
+    let end = (*cursor).max(selection.end);
+    let start = clamp_search_boundary(text, start);
+    let end = clamp_search_boundary(text, end.max(start));
+    text.replace_range(start..end, inserted);
+    *cursor = start + inserted.len();
+    *anchor = *cursor;
+}
+
+fn backspace_overlay_buffer(
+    text: &mut String,
+    cursor: &mut usize,
+    anchor: &mut usize,
+    marked: usize,
+) {
+    *cursor = clamp_search_boundary(text, *cursor);
+    *anchor = clamp_search_boundary(text, *anchor);
+    if marked > 0 {
+        let start = cursor.saturating_sub(marked.min(*cursor));
+        text.replace_range(start..*cursor, "");
+        *cursor = start;
+        *anchor = start;
+        return;
+    }
+    let selection = overlay_selection(text, *cursor, *anchor);
+    let range = if selection.is_empty() {
+        previous_search_boundary(text, *cursor)..*cursor
+    } else {
+        selection
+    };
+    text.replace_range(range.clone(), "");
+    *cursor = range.start;
+    *anchor = *cursor;
+}
+
+fn delete_overlay_buffer(text: &mut String, cursor: &mut usize, anchor: &mut usize) {
+    *cursor = clamp_search_boundary(text, *cursor);
+    *anchor = clamp_search_boundary(text, *anchor);
+    let selection = overlay_selection(text, *cursor, *anchor);
+    let range = if selection.is_empty() {
+        *cursor..next_search_boundary(text, *cursor)
+    } else {
+        selection
+    };
+    text.replace_range(range.clone(), "");
+    *cursor = range.start;
+    *anchor = *cursor;
+}
+
+fn extend_overlay_caret(text: &str, cursor: &mut usize, offset: usize) {
+    *cursor = clamp_search_boundary(text, offset);
+}
+
 fn stable_opaque_token_range(
     document: &MarkdownDocument,
     cursor: usize,
@@ -1776,10 +1918,12 @@ impl MarkionApp {
                 source_range: anchor.source_range,
                 document_version: self.active_tab().document.version(),
                 label: anchor.label,
-                url: anchor.url,
+                url: anchor.url.clone(),
                 title: anchor.title.unwrap_or_default(),
                 field: LinkEditorField::Url,
                 html_anchor: true,
+                cursor: anchor.url.len(),
+                anchor: anchor.url.len(),
             });
             self.input_marked_len = 0;
             self.status = p0_t(self.language, P0Msg::EditingLink).into();
@@ -1816,10 +1960,12 @@ impl MarkionApp {
             source_range,
             document_version: self.active_tab().document.version(),
             label,
-            url,
+            url: url.clone(),
             title,
             field: LinkEditorField::Url,
             html_anchor: false,
+            cursor: url.len(),
+            anchor: url.len(),
         });
         self.input_marked_len = 0;
         self.status = p0_t(self.language, P0Msg::EditingLink).into();
@@ -1852,12 +1998,15 @@ impl MarkionApp {
             return;
         };
         let draft = inline_math_payload(authored);
+        let caret = draft.len();
         self.link_editor = None;
         self.token_editor = Some(TokenEditorState {
             kind: TokenEditorKind::MathPayload,
             source_range,
             document_version: self.active_tab().document.version(),
             draft,
+            cursor: caret,
+            anchor: caret,
         });
         self.input_marked_len = 0;
         self.status = t(self.language, Msg::VisualInlineEditFormula).into();
@@ -1874,12 +2023,16 @@ impl MarkionApp {
         let Some(draft) = text.get(source_range.clone()) else {
             return;
         };
+        let draft = draft.to_string();
+        let caret = draft.len();
         self.link_editor = None;
         self.token_editor = Some(TokenEditorState {
             kind,
             source_range,
             document_version: self.active_tab().document.version(),
-            draft: draft.to_string(),
+            draft,
+            cursor: caret,
+            anchor: caret,
         });
         self.input_marked_len = 0;
         self.status = t(
@@ -1962,11 +2115,255 @@ impl MarkionApp {
         field: LinkEditorField,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.link_editor.as_mut() {
-            editor.field = field;
+        let Some(editor) = self.link_editor.as_mut() else {
+            return;
+        };
+        if editor.field == field {
+            cx.notify();
+            return;
+        }
+        editor.field = field;
+        let end = match field {
+            LinkEditorField::Label => editor.label.len(),
+            LinkEditorField::Url => editor.url.len(),
+            LinkEditorField::Title => editor.title.len(),
+        };
+        editor.cursor = end;
+        editor.anchor = end;
+        self.input_marked_len = 0;
+        cx.notify();
+    }
+
+    pub(super) fn drag_overlay_caret(
+        &mut self,
+        drag: OverlayTextDrag,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.overlay_text_drag != Some(drag) {
+            return;
+        }
+        match drag {
+            OverlayTextDrag::Token => {
+                let Some(editor) = self.token_editor.as_mut() else {
+                    return;
+                };
+                extend_overlay_caret(&editor.draft, &mut editor.cursor, offset);
+            }
+            OverlayTextDrag::Link(field) => {
+                let Some(editor) = self.link_editor.as_mut() else {
+                    return;
+                };
+                if editor.field != field {
+                    return;
+                }
+                let LinkEditorState {
+                    field,
+                    label,
+                    url,
+                    title,
+                    cursor,
+                    ..
+                } = editor;
+                let text = match *field {
+                    LinkEditorField::Label => label.as_str(),
+                    LinkEditorField::Url => url.as_str(),
+                    LinkEditorField::Title => title.as_str(),
+                };
+                extend_overlay_caret(text, cursor, offset);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn place_link_editor_caret(
+        &mut self,
+        field: LinkEditorField,
+        offset: usize,
+        extend: bool,
+        click_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.link_editor.as_mut() else {
+            return;
+        };
+        editor.field = field;
+        let LinkEditorState {
+            field,
+            label,
+            url,
+            title,
+            cursor,
+            anchor,
+            ..
+        } = editor;
+        let text = match *field {
+            LinkEditorField::Label => label.as_str(),
+            LinkEditorField::Url => url.as_str(),
+            LinkEditorField::Title => title.as_str(),
+        };
+        place_overlay_caret(text, cursor, anchor, offset, extend, click_count);
+        self.input_marked_len = 0;
+        cx.notify();
+    }
+
+    pub(super) fn place_token_editor_caret(
+        &mut self,
+        offset: usize,
+        extend: bool,
+        click_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.token_editor.as_mut() else {
+            return;
+        };
+        place_overlay_caret(
+            &editor.draft,
+            &mut editor.cursor,
+            &mut editor.anchor,
+            offset,
+            extend,
+            click_count,
+        );
+        self.input_marked_len = 0;
+        cx.notify();
+    }
+
+    pub(super) fn move_overlay_caret(
+        &mut self,
+        movement: SearchCaretMove,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(editor) = self.token_editor.as_mut() {
+            move_overlay_buffer(
+                &mut editor.draft,
+                &mut editor.cursor,
+                &mut editor.anchor,
+                movement,
+            );
             self.input_marked_len = 0;
             cx.notify();
+            return true;
         }
+        let Some(editor) = self.link_editor.as_mut() else {
+            return false;
+        };
+        let LinkEditorState {
+            field,
+            label,
+            url,
+            title,
+            cursor,
+            anchor,
+            ..
+        } = editor;
+        let text = match *field {
+            LinkEditorField::Label => label,
+            LinkEditorField::Url => url,
+            LinkEditorField::Title => title,
+        };
+        move_overlay_buffer(text, cursor, anchor, movement);
+        self.input_marked_len = 0;
+        cx.notify();
+        true
+    }
+
+    pub(super) fn insert_overlay_text(
+        &mut self,
+        text: &str,
+        keep_marked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let marked = self.input_marked_len;
+        if let Some(editor) = self.token_editor.as_mut() {
+            insert_overlay_buffer(
+                &mut editor.draft,
+                &mut editor.cursor,
+                &mut editor.anchor,
+                marked,
+                text,
+            );
+        } else if let Some(editor) = self.link_editor.as_mut() {
+            let LinkEditorState {
+                field,
+                label,
+                url,
+                title,
+                cursor,
+                anchor,
+                ..
+            } = editor;
+            let buffer = match *field {
+                LinkEditorField::Label => label,
+                LinkEditorField::Url => url,
+                LinkEditorField::Title => title,
+            };
+            insert_overlay_buffer(buffer, cursor, anchor, marked, text);
+        } else {
+            return;
+        }
+        self.input_marked_len = if keep_marked { text.len() } else { 0 };
+        self.after_input_changed(cx);
+    }
+
+    pub(super) fn backspace_overlay_text(&mut self, cx: &mut Context<Self>) -> bool {
+        let marked = self.input_marked_len;
+        if let Some(editor) = self.token_editor.as_mut() {
+            backspace_overlay_buffer(
+                &mut editor.draft,
+                &mut editor.cursor,
+                &mut editor.anchor,
+                marked,
+            );
+        } else if let Some(editor) = self.link_editor.as_mut() {
+            let LinkEditorState {
+                field,
+                label,
+                url,
+                title,
+                cursor,
+                anchor,
+                ..
+            } = editor;
+            let buffer = match *field {
+                LinkEditorField::Label => label,
+                LinkEditorField::Url => url,
+                LinkEditorField::Title => title,
+            };
+            backspace_overlay_buffer(buffer, cursor, anchor, marked);
+        } else {
+            return false;
+        }
+        self.input_marked_len = 0;
+        self.after_input_changed(cx);
+        true
+    }
+
+    pub(super) fn delete_overlay_text_forward(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(editor) = self.token_editor.as_mut() {
+            delete_overlay_buffer(&mut editor.draft, &mut editor.cursor, &mut editor.anchor);
+        } else if let Some(editor) = self.link_editor.as_mut() {
+            let LinkEditorState {
+                field,
+                label,
+                url,
+                title,
+                cursor,
+                anchor,
+                ..
+            } = editor;
+            let buffer = match *field {
+                LinkEditorField::Label => label,
+                LinkEditorField::Url => url,
+                LinkEditorField::Title => title,
+            };
+            delete_overlay_buffer(buffer, cursor, anchor);
+        } else {
+            return false;
+        }
+        self.input_marked_len = 0;
+        self.after_input_changed(cx);
+        true
     }
 
     pub(super) fn cancel_link_editor(&mut self, cx: &mut Context<Self>) {
@@ -2216,6 +2613,8 @@ impl MarkionApp {
             title: String::new(),
             field: LinkEditorField::Url,
             html_anchor: false,
+            cursor: 0,
+            anchor: 0,
         });
         self.input_marked_len = 0;
         cx.notify();
@@ -2240,10 +2639,12 @@ impl MarkionApp {
             source_range: 0..0,
             document_version: self.active_tab().document.version(),
             label: String::new(),
-            url: value,
+            url: value.clone(),
             title: String::new(),
             field: LinkEditorField::Url,
             html_anchor: false,
+            cursor: value.len(),
+            anchor: value.len(),
         });
         self.input_marked_len = 0;
         cx.notify();
@@ -3157,6 +3558,9 @@ impl MarkionApp {
         if self.move_search_caret(SearchCaretMove::Left, cx) {
             return;
         }
+        if self.move_overlay_caret(SearchCaretMove::Left, cx) {
+            return;
+        }
         if self.pending_name_input.is_some() {
             self.move_name_caret(NameCaretMove::Left, cx);
             return;
@@ -3189,6 +3593,9 @@ impl MarkionApp {
 
     pub(super) fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
         if self.move_search_caret(SearchCaretMove::Right, cx) {
+            return;
+        }
+        if self.move_overlay_caret(SearchCaretMove::Right, cx) {
             return;
         }
         if self.pending_name_input.is_some() {
@@ -3225,6 +3632,9 @@ impl MarkionApp {
         if self.move_search_caret(SearchCaretMove::SelectLeft, cx) {
             return;
         }
+        if self.move_overlay_caret(SearchCaretMove::SelectLeft, cx) {
+            return;
+        }
         if self.pending_name_input.is_some() {
             self.move_name_caret(NameCaretMove::SelectLeft, cx);
             return;
@@ -3244,6 +3654,9 @@ impl MarkionApp {
 
     pub(super) fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         if self.move_search_caret(SearchCaretMove::SelectRight, cx) {
+            return;
+        }
+        if self.move_overlay_caret(SearchCaretMove::SelectRight, cx) {
             return;
         }
         if self.pending_name_input.is_some() {
@@ -3339,6 +3752,9 @@ impl MarkionApp {
         if self.move_search_caret(SearchCaretMove::SelectAll, cx) {
             return;
         }
+        if self.move_overlay_caret(SearchCaretMove::SelectAll, cx) {
+            return;
+        }
         if self.pending_name_input.is_some() {
             self.move_name_caret(NameCaretMove::SelectAll, cx);
             return;
@@ -3350,6 +3766,9 @@ impl MarkionApp {
 
     pub(super) fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         if self.move_search_caret(SearchCaretMove::Home, cx) {
+            return;
+        }
+        if self.move_overlay_caret(SearchCaretMove::Home, cx) {
             return;
         }
         if self.pending_name_input.is_some() {
@@ -3367,6 +3786,9 @@ impl MarkionApp {
 
     pub(super) fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         if self.move_search_caret(SearchCaretMove::End, cx) {
+            return;
+        }
+        if self.move_overlay_caret(SearchCaretMove::End, cx) {
             return;
         }
         if self.pending_name_input.is_some() {
@@ -4762,6 +5184,41 @@ impl MarkionApp {
         if !url.trim().is_empty() {
             cx.open_url(url);
         }
+    }
+
+    /// Opens the navigation target under `offset`, if the run has one.
+    pub(super) fn activate_visual_navigation_at(
+        &mut self,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self.visual_navigation_target_at(offset) else {
+            return false;
+        };
+        self.activate_visual_navigation(&target, cx);
+        true
+    }
+
+    fn visual_navigation_target_at(&self, offset: usize) -> Option<VisualNavigationTarget> {
+        let blocks = self.active_tab().document.visual_blocks_shared();
+        let mut at_end = None;
+        for block in blocks.iter() {
+            for run in &block.editable_runs {
+                let Some(nav) = &run.navigation else {
+                    continue;
+                };
+                if matches!(nav, VisualNavigationTarget::Url(url) if url.trim().is_empty()) {
+                    continue;
+                }
+                if run.content_range.contains(&offset) {
+                    return Some(nav.clone());
+                }
+                if offset == run.content_range.end {
+                    at_end = Some(nav.clone());
+                }
+            }
+        }
+        at_end
     }
 
     /// Opens a URL or jumps to a footnote definition from a Visual Edit icon.

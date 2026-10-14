@@ -1448,6 +1448,12 @@ enum LinkEditorField {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayTextDrag {
+    Link(LinkEditorField),
+    Token,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkEditorKind {
     Link,
     Image,
@@ -1468,6 +1474,10 @@ struct LinkEditorState {
     field: LinkEditorField,
     /// Confirm writes an HTML `<a>` instead of a Markdown link.
     html_anchor: bool,
+    /// Caret in the active field, as a byte offset on a char boundary.
+    cursor: usize,
+    /// Selection anchor. Equal to `cursor` when the selection is collapsed.
+    anchor: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1484,6 +1494,10 @@ struct TokenEditorState {
     source_range: Range<usize>,
     document_version: u64,
     draft: String,
+    /// Caret in `draft`, as a byte offset on a char boundary.
+    cursor: usize,
+    /// Selection anchor. Equal to `cursor` when the selection is collapsed.
+    anchor: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -2728,6 +2742,8 @@ struct MarkionApp {
     /// The single-line field a left-button drag selection started in; moves
     /// extend that field's selection until the button is released.
     search_field_drag: Option<SearchField>,
+    /// Drag selection inside the link editor or the floating token editor.
+    overlay_text_drag: Option<OverlayTextDrag>,
     /// Session-only top-left of a moved Find / Replace overlay in window
     /// coordinates; `None` keeps the default upper-right layout.
     search_overlay_origin: Option<Point<Pixels>>,

@@ -17401,6 +17401,181 @@ fn canceling_link_editor_preserves_version_cache_and_history(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn link_editor_click_places_the_caret_where_the_pointer_lands(cx: &mut TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text("label"))];
+        app.view_mode = ViewMode::VisualEdit;
+        app
+    });
+    cx.update(|window, cx| {
+        window.focus(&app.read(cx).focus_handle);
+        window.activate_window();
+    });
+    app.update(cx, |app, cx| {
+        app.open_link_editor(cx);
+        let editor = app.link_editor.as_mut().unwrap();
+        editor.url = "abcdefghij".into();
+        editor.field = LinkEditorField::Url;
+        editor.cursor = editor.url.len();
+        editor.anchor = editor.cursor;
+    });
+    cx.run_until_parked();
+    let field = cx
+        .debug_bounds("link-editor-url-text")
+        .expect("url text is painted");
+    cx.simulate_mouse_down(
+        point(field.left() + px(1.), field.center().y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    app.update(cx, |app, cx| {
+        let editor = app.link_editor.as_ref().unwrap();
+        assert!(
+            editor.cursor < editor.url.len(),
+            "click at the left edge left the caret at {}",
+            editor.cursor
+        );
+        assert_eq!(editor.anchor, editor.cursor);
+        app.insert_overlay_text("X", false, cx);
+        assert!(
+            app.link_editor.as_ref().unwrap().url.starts_with('X'),
+            "typed text follows the click, got {}",
+            app.link_editor.as_ref().unwrap().url
+        );
+    });
+}
+
+#[gpui::test]
+fn link_editor_drag_selects_text_and_token_editor_closes_on_outside_click(cx: &mut TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text("label"))];
+        app.view_mode = ViewMode::VisualEdit;
+        app
+    });
+    cx.update(|window, cx| {
+        window.focus(&app.read(cx).focus_handle);
+        window.activate_window();
+    });
+    app.update(cx, |app, cx| {
+        app.open_link_editor(cx);
+        let editor = app.link_editor.as_mut().unwrap();
+        editor.url = "abcdefghij".into();
+        editor.cursor = 0;
+        editor.anchor = 0;
+    });
+    cx.run_until_parked();
+    let field = cx
+        .debug_bounds("link-editor-url-text")
+        .expect("url text is painted");
+    let y = field.center().y;
+    cx.simulate_mouse_down(
+        point(field.left() + px(1.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(
+        point(field.right() + px(30.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    app.update(cx, |app, cx| {
+        let before = {
+            let editor = app.link_editor.as_ref().unwrap();
+            assert!(
+                editor.anchor != editor.cursor,
+                "drag should select, anchor {} cursor {}",
+                editor.anchor,
+                editor.cursor
+            );
+            assert_eq!(editor.anchor.min(editor.cursor), 0);
+            editor.url.clone()
+        };
+        app.insert_overlay_text("Z", false, cx);
+        let url = app.link_editor.as_ref().unwrap().url.clone();
+        assert_ne!(url, before);
+        assert!(url.contains('Z'));
+        assert!(
+            url.len() <= before.len(),
+            "typing replaces the selection, got {url}"
+        );
+    });
+    cx.simulate_mouse_up(
+        point(field.right() + px(30.), y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+
+    let math = "Energy $E=mc^2$ stays.";
+    let math_doc = MarkdownDocument::from_text(math);
+    let math_range = math_doc
+        .visual_blocks()
+        .into_iter()
+        .find_map(|block| {
+            block.editable_runs.into_iter().find_map(|run| {
+                run.math
+                    .filter(|math| math.latex.contains("mc"))
+                    .map(|_| run.content_range)
+            })
+        })
+        .expect("inline math");
+    app.update(cx, |app, cx| {
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(math))];
+        app.view_mode = ViewMode::VisualEdit;
+        app.stable_visual_inline = true;
+        app.link_editor = None;
+        app.open_inline_math_editor(math_range, cx);
+        assert!(app.token_editor.is_some());
+    });
+    cx.run_until_parked();
+    cx.simulate_mouse_down(
+        point(px(12.), px(420.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    app.update(cx, |app, _| {
+        assert!(
+            app.token_editor.is_none(),
+            "outside click hides the formula editor"
+        );
+        assert_eq!(app.active_tab().document.text(), math);
+    });
+}
+
+#[gpui::test]
+fn secondary_click_target_opens_heading_and_footnote_without_mutating(cx: &mut TestAppContext) {
+    let source = "## Hello\n\n[go](#hello)\n\nSee [^note].\n\n[^note]: The note.\n";
+    let heading_offset = source.find("## Hello").unwrap();
+    let link_offset = source.find("[go]").unwrap() + 1;
+    let footnote_offset = source.find("[^note]").unwrap() + 2;
+    let definition_offset = source.find("[^note]:").unwrap();
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = MarkionApp::new(cx);
+        app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(source))];
+        app.view_mode = ViewMode::VisualEdit;
+        app
+    });
+    app.update(cx, |app, cx| {
+        let version = app.active_tab().document.version();
+        assert!(app.activate_visual_navigation_at(link_offset, cx));
+        assert_eq!(
+            app.active_tab().selected_range,
+            heading_offset..heading_offset
+        );
+        assert!(!app.activate_visual_navigation_at(heading_offset, cx));
+        assert!(app.activate_visual_navigation_at(footnote_offset, cx));
+        assert_eq!(app.active_tab().selected_range.start, definition_offset);
+        assert_eq!(app.active_tab().document.text(), source);
+        assert_eq!(app.active_tab().document.version(), version);
+    });
+}
+
+#[gpui::test]
 fn link_editor_ime_composition_stays_out_of_canonical_markdown_until_apply(
     cx: &mut TestAppContext,
 ) {

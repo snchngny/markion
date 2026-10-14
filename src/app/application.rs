@@ -410,6 +410,7 @@ impl MarkionApp {
             search_generation: None,
             search_field_bounds: [None; 13],
             search_field_drag: None,
+            overlay_text_drag: None,
             search_overlay_origin: None,
             search_overlay_bounds: None,
             search_overlay_grab: Point::default(),
@@ -2799,8 +2800,10 @@ impl MarkionApp {
             // The name prompt edits a single buffer; no search/tree filtering
             // runs while it is open.
             self.status = t(self.language, Msg::StatusNamingEntry).into();
-        } else if self.link_editor.is_some() {
-            self.status = p0_t(self.language, P0Msg::EditingLink).into();
+        } else if self.link_editor.is_some() || self.token_editor.is_some() {
+            if self.link_editor.is_some() {
+                self.status = p0_t(self.language, P0Msg::EditingLink).into();
+            }
         } else if self.file_tree_query_focused {
             self.status = self.file_tree_summary().into();
         } else {
@@ -2829,6 +2832,10 @@ impl MarkionApp {
     ) {
         if self.pending_name_input.is_some() {
             self.insert_redirected_name_text(text, keep_marked, cx);
+            return;
+        }
+        if self.link_editor.is_some() || self.token_editor.is_some() {
+            self.insert_overlay_text(text, keep_marked, cx);
             return;
         }
         if let Some(field) = self.focused_search_field_mut() {
@@ -3076,6 +3083,9 @@ impl MarkionApp {
             self.after_input_changed(cx);
             return true;
         }
+        if self.backspace_overlay_text(cx) {
+            return true;
+        }
         self.input_marked_len = 0;
         if let Some(target) = self.active_input_text_mut() {
             target.pop();
@@ -3097,6 +3107,9 @@ impl MarkionApp {
             field.delete_forward();
             self.search_generation = None;
             self.after_input_changed(cx);
+            return true;
+        }
+        if self.delete_overlay_text_forward(cx) {
             return true;
         }
         false
