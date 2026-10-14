@@ -787,12 +787,17 @@ jobs:
               etag=""
               for attempt in 1 2 3 4; do
                 now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
-                signature="$(printf '%b' "PUT\n\n\n${now}\n/${bucket}/${dest}?partNumber=$((i + 1))&uploadId=${upload_id}" \
+                # Sign the exact Content-Type curl will send: with a body and
+                # no explicit header curl injects its
+                # application/x-www-form-urlencoded default, which OSS then
+                # re-signs (mismatch) unless it is signed too.
+                signature="$(printf '%b' "PUT\n\napplication/octet-stream\n${now}\n/${bucket}/${dest}?partNumber=$((i + 1))&uploadId=${upload_id}" \
                   | openssl dgst -sha1 -hmac "${key_secret}" -binary | base64 | tr -d '\n')"
                 etag="$(curl -sS --connect-timeout 30 --max-time 1800 \
                   -D - -o "${part_file}.err" \
                   -X PUT \
                   -H "Date: ${now}" \
+                  -H "Content-Type: application/octet-stream" \
                   -H "Authorization: OSS ${key_id}:${signature}" \
                   --data-binary "@${part_file}" \
                   "${base_url}?partNumber=$((i + 1))&uploadId=${upload_id_enc}" \
