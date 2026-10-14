@@ -739,14 +739,26 @@ jobs:
               -X DELETE \
               -H "Date: ${now}" \
               -H "Authorization: OSS ${key_id}:${signature}" \
-              "https://${bucket}.${endpoint}/${dest}?uploadId=${upload_id}" >/dev/null 2>&1 || true
+              "https://${bucket}.${endpoint}/${dest}?uploadId=$(oss_url_encode "${upload_id}")" >/dev/null 2>&1 || true
+          }
+
+          # OSS upload ids can carry base64 reserved characters. The
+          # signature covers the raw value, but the request URL must
+          # percent-encode it or the server decodes it into a different
+          # query and rejects the request with SignatureDoesNotMatch.
+          oss_url_encode() {
+            local s="$1"
+            s="${s//+/%2B}"
+            s="${s//\//%2F}"
+            s="${s//=/%3D}"
+            printf '%s' "${s}"
           }
 
           upload_multipart() {
             local src="$1" dest="$2" size="$3"
             local base_url="https://${bucket}.${endpoint}/${dest}"
             local part_count=$(( (size + part_size_bytes - 1) / part_size_bytes ))
-            local upload_id="" now signature attempt i etag part_file
+            local upload_id="" upload_id_enc now signature attempt i etag part_file
             for attempt in 1 2 3; do
               now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
               signature="$(printf '%b' "POST\n\n\n${now}\n/${bucket}/${dest}?uploads" \
@@ -766,6 +778,8 @@ jobs:
               echo "Failed to initiate multipart upload for ${dest}" >&2
               return 1
             fi
+            upload_id_enc="$(oss_url_encode "${upload_id}")"
+            echo "Multipart upload ${dest}: ${part_count} parts, upload id ${upload_id}"
             local parts_xml="<CompleteMultipartUpload>"
             for ((i = 0; i < part_count; i++)); do
               part_file="${src}.part${i}"
@@ -775,20 +789,25 @@ jobs:
                 now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
                 signature="$(printf '%b' "PUT\n\n\n${now}\n/${bucket}/${dest}?partNumber=$((i + 1))&uploadId=${upload_id}" \
                   | openssl dgst -sha1 -hmac "${key_secret}" -binary | base64 | tr -d '\n')"
-                etag="$(curl -fsS --connect-timeout 30 --max-time 1800 \
-                  -D - -o /dev/null \
+                etag="$(curl -sS --connect-timeout 30 --max-time 1800 \
+                  -D - -o "${part_file}.err" \
                   -X PUT \
                   -H "Date: ${now}" \
                   -H "Authorization: OSS ${key_id}:${signature}" \
                   --data-binary "@${part_file}" \
-                  "${base_url}?partNumber=$((i + 1))&uploadId=${upload_id}" \
+                  "${base_url}?partNumber=$((i + 1))&uploadId=${upload_id_enc}" \
                   | tr -d '\r' \
                   | awk -F': *' 'tolower($1) == "etag" {gsub(/"/, "", $2); print $2; exit}' || true)"
                 [[ -n "${etag}" ]] && break
                 echo "Part $((i + 1))/${part_count} attempt ${attempt} failed for ${dest}" >&2
+                if [[ -s "${part_file}.err" ]]; then
+                  echo "Part upload error response (truncated):" >&2
+                  head -c 1024 "${part_file}.err" >&2 || true
+                  echo >&2
+                fi
                 sleep 3
               done
-              rm -f "${part_file}"
+              rm -f "${part_file}" "${part_file}.err"
               if [[ -z "${etag}" ]]; then
                 echo "Failed to upload part $((i + 1)) of ${dest}" >&2
                 abort_multipart "${dest}" "${upload_id}"
@@ -808,7 +827,7 @@ jobs:
                 -H "Content-Type: application/xml" \
                 -H "Authorization: OSS ${key_id}:${signature}" \
                 --data-binary "${parts_xml}" \
-                "${base_url}?uploadId=${upload_id}" >/dev/null
+                "${base_url}?uploadId=${upload_id_enc}" >/dev/null
               then
                 echo "Uploaded ${dest} (${part_count} multipart parts)"
                 return 0
