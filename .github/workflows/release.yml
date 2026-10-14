@@ -670,6 +670,15 @@ jobs:
           prefix="${OSS_PREFIX%/}"
           prefix_dir="${prefix}/latest"
 
+          # Single-shot PUTs degrade badly on slow transpacific routes: once
+          # throughput falls below ~30KB/s, an installer tens of megabytes
+          # large can never finish inside any per-request timeout, so retries
+          # loop forever. Files above this threshold upload as OSS multipart
+          # with small parts, each on its own connection with its own retries.
+          multipart_threshold=16777216
+          part_size_mb=8
+          part_size_bytes=$((part_size_mb * 1024 * 1024))
+
           upload() {
             local src="$1" dest="$2"
             local url="https://${bucket}.${endpoint}/${dest}"
@@ -686,6 +695,13 @@ jobs:
             if [[ -n "${remote_etag}" && "${remote_etag}" == "${local_md5}" ]]; then
               echo "Already mirrored ${dest}"
               return 0
+            fi
+
+            local size
+            size="$(stat -c%s "${src}")"
+            if (( size > multipart_threshold )); then
+              upload_multipart "${src}" "${dest}" "${size}"
+              return
             fi
 
             content_type="application/octet-stream"
@@ -711,6 +727,97 @@ jobs:
               sleep 3
             done
             echo "Failed to upload ${dest} after 4 attempts" >&2
+            return 1
+          }
+
+          abort_multipart() {
+            local dest="$1" upload_id="$2" now signature
+            now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
+            signature="$(printf '%b' "DELETE\n\n\n${now}\n/${bucket}/${dest}?uploadId=${upload_id}" \
+              | openssl dgst -sha1 -hmac "${key_secret}" -binary | base64 | tr -d '\n')"
+            curl -fsS --connect-timeout 30 --max-time 120 \
+              -X DELETE \
+              -H "Date: ${now}" \
+              -H "Authorization: OSS ${key_id}:${signature}" \
+              "https://${bucket}.${endpoint}/${dest}?uploadId=${upload_id}" >/dev/null 2>&1 || true
+          }
+
+          upload_multipart() {
+            local src="$1" dest="$2" size="$3"
+            local base_url="https://${bucket}.${endpoint}/${dest}"
+            local part_count=$(( (size + part_size_bytes - 1) / part_size_bytes ))
+            local upload_id="" now signature attempt i etag part_file
+            for attempt in 1 2 3; do
+              now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
+              signature="$(printf '%b' "POST\n\n\n${now}\n/${bucket}/${dest}?uploads" \
+                | openssl dgst -sha1 -hmac "${key_secret}" -binary | base64 | tr -d '\n')"
+              upload_id="$(curl -fsS --connect-timeout 30 --max-time 120 \
+                -X POST \
+                -H "Date: ${now}" \
+                -H "Authorization: OSS ${key_id}:${signature}" \
+                "${base_url}?uploads" \
+                | tr -d '\n' \
+                | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p' || true)"
+              [[ -n "${upload_id}" ]] && break
+              echo "Multipart initiate attempt ${attempt} failed for ${dest}" >&2
+              sleep 3
+            done
+            if [[ -z "${upload_id}" ]]; then
+              echo "Failed to initiate multipart upload for ${dest}" >&2
+              return 1
+            fi
+            local parts_xml="<CompleteMultipartUpload>"
+            for ((i = 0; i < part_count; i++)); do
+              part_file="${src}.part${i}"
+              dd if="${src}" of="${part_file}" bs=1M count="${part_size_mb}" skip=$((i * part_size_mb)) status=none
+              etag=""
+              for attempt in 1 2 3 4; do
+                now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
+                signature="$(printf '%b' "PUT\n\n\n${now}\n/${bucket}/${dest}?partNumber=$((i + 1))&uploadId=${upload_id}" \
+                  | openssl dgst -sha1 -hmac "${key_secret}" -binary | base64 | tr -d '\n')"
+                etag="$(curl -fsS --connect-timeout 30 --max-time 1800 \
+                  -D - -o /dev/null \
+                  -X PUT \
+                  -H "Date: ${now}" \
+                  -H "Authorization: OSS ${key_id}:${signature}" \
+                  --data-binary "@${part_file}" \
+                  "${base_url}?partNumber=$((i + 1))&uploadId=${upload_id}" \
+                  | tr -d '\r' \
+                  | awk -F': *' 'tolower($1) == "etag" {gsub(/"/, "", $2); print $2; exit}' || true)"
+                [[ -n "${etag}" ]] && break
+                echo "Part $((i + 1))/${part_count} attempt ${attempt} failed for ${dest}" >&2
+                sleep 3
+              done
+              rm -f "${part_file}"
+              if [[ -z "${etag}" ]]; then
+                echo "Failed to upload part $((i + 1)) of ${dest}" >&2
+                abort_multipart "${dest}" "${upload_id}"
+                return 1
+              fi
+              parts_xml+="<Part><PartNumber>$((i + 1))</PartNumber><ETag>\"${etag}\"</ETag></Part>"
+              echo "Uploaded part $((i + 1))/${part_count} of ${dest}"
+            done
+            parts_xml+="</CompleteMultipartUpload>"
+            for attempt in 1 2 3; do
+              now="$(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
+              signature="$(printf '%b' "POST\n\napplication/xml\n${now}\n/${bucket}/${dest}?uploadId=${upload_id}" \
+                | openssl dgst -sha1 -hmac "${key_secret}" -binary | base64 | tr -d '\n')"
+              if curl -fsS --connect-timeout 30 --max-time 300 \
+                -X POST \
+                -H "Date: ${now}" \
+                -H "Content-Type: application/xml" \
+                -H "Authorization: OSS ${key_id}:${signature}" \
+                --data-binary "${parts_xml}" \
+                "${base_url}?uploadId=${upload_id}" >/dev/null
+              then
+                echo "Uploaded ${dest} (${part_count} multipart parts)"
+                return 0
+              fi
+              echo "Multipart complete attempt ${attempt} failed for ${dest}" >&2
+              sleep 3
+            done
+            echo "Failed to complete multipart upload for ${dest}" >&2
+            abort_multipart "${dest}" "${upload_id}"
             return 1
           }
 
