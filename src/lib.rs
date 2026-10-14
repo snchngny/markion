@@ -199,7 +199,7 @@ pub use visual::{
     build_visual_projection, build_visual_projection_with_marked_range, data_uri_payload_ranges,
     destination_data_uri_fingerprint, elided_payload_token, format_byte_size,
     indented_code_display, indented_code_indent_unit, indented_code_line_indent,
-    task_checkbox_toggle,
+    task_checkbox_toggle, whitespace_collapses_separator, whitespace_visible_line_count,
 };
 
 /// A compiled find pattern shared by source-document and rendered-preview

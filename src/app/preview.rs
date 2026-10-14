@@ -958,6 +958,8 @@ struct WhitespaceCaretLayout {
     caret_shift: Pixels,
     source_range: Range<usize>,
     line_height: f32,
+    paragraph_spacing: f32,
+    caret_height: f32,
 }
 
 impl VisualEditableText {
@@ -969,7 +971,7 @@ impl VisualEditableText {
         if let Some(whitespace) = &self.whitespace_caret {
             return Some(Bounds::new(
                 point(bounds.origin.x, bounds.origin.y + whitespace.caret_shift),
-                size(px(2.), px(whitespace.line_height)),
+                size(px(2.), px(whitespace.caret_height)),
             ));
         }
         let layout = self.text.layout();
@@ -1223,6 +1225,7 @@ impl Element for VisualEditableText {
                         event.position.y - row_top,
                         &text,
                         whitespace.line_height,
+                        whitespace.paragraph_spacing,
                     ),
                     None,
                 )
@@ -1318,6 +1321,7 @@ impl Element for VisualEditableText {
                     event.position.y - row_top,
                     &text,
                     whitespace.line_height,
+                    whitespace.paragraph_spacing,
                 )
             } else if let Some(text_layout) = text_layout.as_ref() {
                 let visible = preview_index_for_position(text_layout, event.position);
@@ -2639,10 +2643,12 @@ pub(super) fn preview_block_splice(
 /// preserved rows receive current offsets without losing cached heights.
 /// Height-mutable rows (whitespace) additionally compare their clamped line
 /// count — identity alone would let a grown or shrunk whitespace row keep
-/// a stale cached list height and under-report the scroll extent. Pixel
-/// height is a render-time `paragraph_line_height` multiplier; splice only
-/// needs the clamped line count so growth past the sanity bound (which no
-/// longer changes the rendered height) also stops forcing re-measures.
+/// a stale cached list height and under-report the scroll extent. Zero body
+/// lines stay zero so a structural separator is distinct from one authored
+/// blank line. Pixel height is a render-time `paragraph_line_height`
+/// multiplier plus the separator band; splice only needs the clamped line
+/// count so growth past the sanity bound (which no longer changes the
+/// rendered height) also stops forcing re-measures.
 pub(super) fn visual_block_splice(
     old: &[VisualBlock],
     new: &[VisualBlock],
@@ -3849,12 +3855,19 @@ pub(super) fn visual_whitespace_caret_element(
     block: &VisualBlock,
     block_index: usize,
     line_height: f32,
+    paragraph_spacing: f32,
     cx: &mut Context<MarkionApp>,
 ) -> gpui::AnyElement {
     let text = app.active_tab().document.text();
     let cursor = app.active_tab().cursor_offset();
     let source_range = block.source_range.clone();
     let caret_line = whitespace_caret_line(source_range.clone(), cursor, text);
+    let band = whitespace_separator_band(source_range.clone(), text, paragraph_spacing);
+    let caret_height = if band > 0. && caret_line == 0 {
+        band.max(1.)
+    } else {
+        line_height
+    };
     let anchor = source_range.start;
     let projection = VisualProjection {
         text: String::new(),
@@ -3881,9 +3894,17 @@ pub(super) fn visual_whitespace_caret_element(
         navigation_y_offset: Pixels::ZERO,
         entity: cx.entity(),
         whitespace_caret: Some(WhitespaceCaretLayout {
-            caret_shift: px(whitespace_caret_y(caret_line, line_height)),
+            caret_shift: px(whitespace_line_top(
+                source_range.clone(),
+                caret_line,
+                text,
+                line_height,
+                paragraph_spacing,
+            )),
             source_range,
             line_height,
+            paragraph_spacing,
+            caret_height,
         }),
         #[cfg(test)]
         test_projection: None,
@@ -4018,17 +4039,34 @@ pub(super) fn visual_block_index_for_offset(
 /// beyond any real document while keeping row heights bounded.
 pub(super) const WHITESPACE_ROW_MAX_LINES: usize = 4096;
 
-/// Covered-newline count used for virtual-list splice identity. Pixel height
-/// is `count * paragraph_line_height` at render time.
+/// Body-line count used for virtual-list splice identity. Zero stays zero so
+/// a structural separator (no body line) is distinct from one authored blank
+/// line. Pixel height is `count * paragraph_line_height` plus the separator
+/// band at render time.
 pub(super) fn whitespace_clamped_line_count(line_count: usize) -> usize {
-    line_count.clamp(1, WHITESPACE_ROW_MAX_LINES)
+    line_count.min(WHITESPACE_ROW_MAX_LINES)
 }
 
-/// Height of a Visual Edit whitespace row: one body paragraph line per
-/// covered newline, floored at one line. Uncapped up to the sanity bound so
-/// trailing blank lines stay visible no matter how many the source carries.
+/// Height of the body-line portion of a Visual Edit whitespace row. A
+/// structural separator contributes paragraph spacing separately and may be
+/// zero lines. Uncapped up to the sanity bound so authored trailing blank
+/// lines stay visible.
 pub(super) fn whitespace_row_height(line_count: usize, line_height: f32) -> f32 {
     whitespace_clamped_line_count(line_count) as f32 * line_height
+}
+
+/// Occupied height of a whitespace row: body lines plus the paragraph-spacing
+/// band when the first newline is only the block separator.
+pub(super) fn whitespace_row_extent(
+    source_range: Range<usize>,
+    text: &str,
+    line_height: f32,
+    paragraph_spacing: f32,
+) -> f32 {
+    whitespace_row_height(
+        whitespace_painted_line_count(source_range.clone(), text),
+        line_height,
+    ) + whitespace_separator_band(source_range, text, paragraph_spacing)
 }
 
 /// Visual Edit preserves authored prose newlines as painted lines even when
@@ -4070,15 +4108,19 @@ pub(super) fn visual_body_flow_paragraph_spacing(
 }
 
 pub(super) fn whitespace_painted_line_count(source_range: Range<usize>, text: &str) -> usize {
-    let end = source_range.end.min(text.len());
-    let start = source_range.start.min(end);
-    whitespace_clamped_line_count(
-        text[start..end]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + usize::from(end == text.len()),
-    )
+    whitespace_clamped_line_count(markion::whitespace_visible_line_count(text, source_range))
+}
+
+pub(super) fn whitespace_separator_band(
+    source_range: Range<usize>,
+    text: &str,
+    paragraph_spacing: f32,
+) -> f32 {
+    if markion::whitespace_collapses_separator(text, source_range) {
+        paragraph_spacing
+    } else {
+        0.
+    }
 }
 
 fn whitespace_newline_offsets(source_range: Range<usize>, text: &str) -> Vec<usize> {
@@ -4098,10 +4140,16 @@ fn whitespace_newline_offsets(source_range: Range<usize>, text: &str) -> Vec<usi
             }
         })
         .collect();
-    if end == text.len() {
+    // An empty document-end row is the insertion stop. A gap that already
+    // contains newlines does not grow a phantom line past the last one.
+    if offsets.is_empty() && end == text.len() {
         offsets.push(end);
     }
     offsets
+}
+
+pub(super) fn whitespace_navigation_line_count(source_range: Range<usize>, text: &str) -> usize {
+    whitespace_newline_offsets(source_range, text).len()
 }
 
 /// Line index within a whitespace row for a source caret. Each covered
@@ -4119,7 +4167,7 @@ pub(super) fn whitespace_caret_line(
         .bytes()
         .filter(|byte| *byte == b'\n')
         .count();
-    let max_line = whitespace_painted_line_count(start..end, text).saturating_sub(1);
+    let max_line = whitespace_navigation_line_count(start..end, text).saturating_sub(1);
     newlines_before.min(max_line)
 }
 
@@ -4165,13 +4213,41 @@ pub(super) fn whitespace_navigation_offset(
     }
 }
 
+pub(super) fn whitespace_line_top(
+    source_range: Range<usize>,
+    line: usize,
+    text: &str,
+    line_height: f32,
+    paragraph_spacing: f32,
+) -> f32 {
+    let band = whitespace_separator_band(source_range, text, paragraph_spacing);
+    if band > 0. {
+        if line == 0 {
+            0.
+        } else {
+            band + (line - 1) as f32 * line_height
+        }
+    } else {
+        line as f32 * line_height
+    }
+}
+
 pub(super) fn whitespace_source_at_y(
     source_range: Range<usize>,
     rel_y: Pixels,
     text: &str,
     line_height: f32,
+    paragraph_spacing: f32,
 ) -> usize {
-    let line = (f32::from(rel_y).max(0.) / line_height.max(1.)).floor() as usize;
+    let band = whitespace_separator_band(source_range.clone(), text, paragraph_spacing);
+    let rel_y = f32::from(rel_y).max(0.);
+    let line = if band > 0. && rel_y < band {
+        0
+    } else if band > 0. {
+        1 + ((rel_y - band) / line_height.max(1.)).floor() as usize
+    } else {
+        (rel_y / line_height.max(1.)).floor() as usize
+    };
     whitespace_source_at_line(source_range, line, text)
 }
 
@@ -4777,16 +4853,32 @@ fn visual_block_content_view(
         VisualBlockKind::Whitespace => {
             let text = app.active_tab().document.text();
             let source_range = block.source_range.clone();
-            let line_count = whitespace_painted_line_count(source_range, text);
             let line_height = typography.paragraph_line_height;
-            let row_height = whitespace_row_height(line_count, line_height);
+            let row_height = whitespace_row_extent(
+                source_range.clone(),
+                text,
+                line_height,
+                typography.paragraph_spacing,
+            );
+            // The separator band already is the paragraph spacing, so a
+            // collapsed row does not also take the body-flow margin. An
+            // empty end row has no body lines either: a bottom margin on a
+            // zero-height box is laid out above its border, which parks the
+            // caret below the spacing and makes the next Enter jump upward.
+            let margin = if row_height == 0.
+                || markion::whitespace_collapses_separator(text, source_range)
+            {
+                0.
+            } else {
+                body_flow_spacing
+            };
 
-            // First-class empty line: body paragraph height, I-beam, and
-            // click mapping whether or not the row owns the caret. The
-            // caret itself is painted only when `owns_caret`.
+            // Structural separators are a spacing hit target. Extra and
+            // trailing blank lines keep body line height. The caret paints
+            // only when `owns_caret`.
             div()
                 .h(px(row_height))
-                .mb(px(body_flow_spacing))
+                .mb(px(margin))
                 .cursor(CursorStyle::IBeam)
                 .debug_selector(|| "visual-whitespace-gap".to_string())
                 .child(visual_whitespace_caret_element(
@@ -4794,6 +4886,7 @@ fn visual_block_content_view(
                     block,
                     block_index,
                     line_height,
+                    typography.paragraph_spacing,
                     cx,
                 ))
         }

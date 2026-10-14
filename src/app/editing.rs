@@ -4474,7 +4474,7 @@ impl MarkionApp {
         let range = block.source_range.clone();
         let text = self.active_tab().document.text().to_string();
         let line = whitespace_caret_line(range.clone(), cursor, &text);
-        let line_count = whitespace_painted_line_count(range.clone(), &text);
+        let line_count = whitespace_navigation_line_count(range.clone(), &text);
         let preferred_x = self.active_tab().visual_preferred_x.unwrap_or(Pixels::ZERO);
         let adjacent_line = match direction {
             VisualNavigationDirection::Up => line.checked_sub(1),

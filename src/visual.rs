@@ -1144,6 +1144,35 @@ fn assign_quote_group_edges(blocks: &mut [VisualBlock]) {
     }
 }
 
+/// Body-height lines a whitespace gap paints.
+///
+/// The first newline of a gap that sits strictly between two blocks is the
+/// CommonMark separator and contributes paragraph spacing instead of a line.
+/// Leading gaps and gaps that reach the document end paint every newline.
+/// An empty end-of-document insertion row paints none. No extra line is added
+/// for a caret sitting at the document end.
+pub fn whitespace_visible_line_count(text: &str, range: Range<usize>) -> usize {
+    let end = range.end.min(text.len());
+    let start = range.start.min(end);
+    let newlines = text[start..end]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    if whitespace_collapses_separator(text, start..end) {
+        newlines - 1
+    } else {
+        newlines
+    }
+}
+
+/// True when this gap's first newline is the block separator rather than an
+/// authored blank line.
+pub fn whitespace_collapses_separator(text: &str, range: Range<usize>) -> bool {
+    let end = range.end.min(text.len());
+    let start = range.start.min(end);
+    start > 0 && end < text.len() && text[start..end].bytes().any(|byte| byte == b'\n')
+}
+
 fn gap_block(
     text: &str,
     range: Range<usize>,
@@ -1165,8 +1194,7 @@ fn gap_block(
             .or_else(|| standalone_quote_gap.then(|| range.clone()));
         let quote_context = quote_group
             .map(|group| quote_context_for_row(text, range.clone(), range.clone(), group));
-        let line_count = slice.bytes().filter(|byte| *byte == b'\n').count()
-            + usize::from(range.end == text.len());
+        let line_count = whitespace_visible_line_count(text, range.clone());
         VisualBlock {
             id: allocate_id(),
             kind: VisualBlockKind::Whitespace,
@@ -3870,7 +3898,7 @@ mod tests {
         assert_eq!(tail.source_range, source.len()..source.len());
         assert!(matches!(tail.kind, VisualBlockKind::Whitespace));
         assert!(tail.quote_context.is_none());
-        assert_eq!(tail.height_signature, Some(1));
+        assert_eq!(tail.height_signature, Some(0));
         content
     }
 
@@ -4579,12 +4607,7 @@ mod tests {
                     );
                     assert!(matches!(gap.kind, VisualBlockKind::Whitespace));
                     assert_eq!(gap.source_range, item.source_range.end..source.len());
-                    assert_eq!(
-                        gap.height_signature,
-                        Some(
-                            (count - 1 + usize::from(gap.source_range.end == source.len())) as u32
-                        )
-                    );
+                    assert_eq!(gap.height_signature, Some((count - 1) as u32));
                     let projection = build_visual_projection(
                         &source,
                         item,
@@ -4614,7 +4637,7 @@ mod tests {
                     first.source_range.end..second.source_range.start
                 );
                 assert_eq!(&source[gap.source_range.clone()], eol);
-                assert_eq!(gap.height_signature, Some(1));
+                assert_eq!(gap.height_signature, Some(0));
             }
         }
     }
@@ -4664,19 +4687,19 @@ mod tests {
                                     .bytes()
                                     .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
                             );
-                            // Three authored blank lines stay three painted
-                            // rows, plus the EOF insertion row at document end.
+                            // The separator newline is spacing. Further blank lines are
+                            // body lines. A gap that reaches the document end does
+                            // not add a phantom line past the last newline.
                             let newlines = source[gap.source_range.clone()]
                                 .bytes()
                                 .filter(|byte| *byte == b'\n')
                                 .count();
-                            assert_eq!(
-                                gap.height_signature,
-                                Some(
-                                    (newlines + usize::from(gap.source_range.end == source.len()))
-                                        as u32
-                                )
-                            );
+                            let visible = if following.is_empty() {
+                                newlines
+                            } else {
+                                newlines.saturating_sub(1)
+                            };
+                            assert_eq!(gap.height_signature, Some(visible as u32));
                             // Formatted content keeps its own reveal mapping
                             // and never swallows a tail line break.
                             let cursor = item
@@ -4731,8 +4754,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(gap.source_range, last_item.source_range.end..fixture.len());
-        // Four authored blank lines plus the EOF insertion row.
-        assert_eq!(gap.height_signature, Some(5));
+        // Four authored blank lines. The document-end caret shares the last
+        // one instead of painting a fifth row.
+        assert_eq!(gap.height_signature, Some(4));
         assert!(gap.quote_context.is_none() && gap.source_island.is_none());
 
         // Loose-list separator, mid-document tail, and plain EOF keep the

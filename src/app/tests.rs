@@ -3387,8 +3387,7 @@ fn preview_block_splice_result_reconstructs_new_slice() {
 #[test]
 fn whitespace_row_height_grows_with_blank_lines_without_the_old_cap() {
     let line_height = default_paragraph_line_height();
-    // Zero/one newline both floor at a single row height.
-    assert_eq!(whitespace_row_height(0, line_height), line_height);
+    assert_eq!(whitespace_row_height(0, line_height), 0.);
     assert_eq!(whitespace_row_height(1, line_height), line_height);
     // Growth is linear and stays visible far past the former 72px cap (~6
     // lines): every Enter at the document tail must change the rendered
@@ -3611,7 +3610,8 @@ fn whitespace_caret_line_tracks_newlines_before_the_source_caret() {
     let line_height = default_paragraph_line_height();
     assert_eq!(whitespace_caret_line(range.clone(), 6, text), 0);
     assert_eq!(whitespace_caret_line(range.clone(), 7, text), 1);
-    assert_eq!(whitespace_caret_line(range, 8, text), 2);
+    // The caret at the document end shares the last newline's line.
+    assert_eq!(whitespace_caret_line(range, 8, text), 1);
     assert_eq!(whitespace_caret_y(0, line_height), 0.);
     assert_eq!(whitespace_caret_y(1, line_height), line_height);
     assert_eq!(whitespace_caret_y(2, line_height), 2. * line_height);
@@ -3624,19 +3624,19 @@ fn whitespace_source_at_line_and_y_map_to_newline_bytes() {
     let line_height = default_paragraph_line_height();
     assert_eq!(whitespace_source_at_line(range.clone(), 0, text), 6);
     assert_eq!(whitespace_source_at_line(range.clone(), 1, text), 7);
-    assert_eq!(whitespace_source_at_line(range.clone(), 2, text), 8);
-    assert_eq!(whitespace_source_at_line(range.clone(), 9, text), 8);
+    assert_eq!(whitespace_source_at_line(range.clone(), 2, text), 7);
+    assert_eq!(whitespace_source_at_line(range.clone(), 9, text), 7);
     assert_eq!(
-        whitespace_source_at_y(range.clone(), px(0.), text, line_height),
+        whitespace_source_at_y(range.clone(), px(0.), text, line_height, 12.),
         6
     );
     assert_eq!(
-        whitespace_source_at_y(range.clone(), px(line_height), text, line_height),
+        whitespace_source_at_y(range.clone(), px(line_height), text, line_height, 12.),
         7
     );
     assert_eq!(
-        whitespace_source_at_y(range, px(2. * line_height + 4.), text, line_height),
-        8
+        whitespace_source_at_y(range, px(2. * line_height + 4.), text, line_height, 12.),
+        7
     );
 }
 
@@ -3659,13 +3659,23 @@ fn visual_blank_line_mapping_preserves_crlf_and_distinct_eof() {
                     .find(|block| matches!(block.kind, VisualBlockKind::Whitespace))
                     .unwrap();
                 assert_eq!(gap.source_range.start, content.len() + eol.len());
-                let count = if suffix.is_empty() { 3 } else { 2 };
+                let newlines = source[gap.source_range.clone()]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count();
+                let visible = if suffix.is_empty() {
+                    newlines
+                } else {
+                    newlines.saturating_sub(1)
+                };
                 assert_eq!(
                     whitespace_painted_line_count(gap.source_range.clone(), &source),
-                    count
+                    visible
                 );
-                assert_eq!(gap.height_signature, Some(count as u32));
-                for row in 0..count {
+                assert_eq!(gap.height_signature, Some(visible as u32));
+                let stops = whitespace_navigation_line_count(gap.source_range.clone(), &source);
+                assert_eq!(stops, newlines);
+                for row in 0..stops {
                     let target = whitespace_source_at_line(gap.source_range.clone(), row, &source);
                     assert_eq!(
                         source[..target].bytes().filter(|b| *b == b'\n').count(),
@@ -3700,7 +3710,8 @@ fn whitespace_source_at_y_lands_on_separator_not_next_block() {
                     && block.source_range.start >= gap.source_range.end
             })
             .expect("content after the gap");
-        let offset = whitespace_source_at_y(gap.source_range.clone(), px(0.), source, line_height);
+        let offset =
+            whitespace_source_at_y(gap.source_range.clone(), px(0.), source, line_height, 12.);
         assert_eq!(
             offset, gap.source_range.start,
             "top of gap {source:?} must land on the separator newline"
@@ -10222,7 +10233,7 @@ fn visual_edit_typing_into_blank_line_preserves_row_height(cx: &mut TestAppConte
     let gap = cx
         .debug_bounds("visual-whitespace-gap")
         .expect("blank line should be rendered");
-    let empty_row = cx
+    let _empty_row = cx
         .debug_bounds("visual-block-row-1")
         .expect("blank line should own a visual row");
     let following_before = cx
@@ -10247,14 +10258,18 @@ fn visual_edit_typing_into_blank_line_preserves_row_height(cx: &mut TestAppConte
         .debug_bounds("visual-block-row-2")
         .expect("following heading should remain rendered");
 
-    assert_eq!(
-        paragraph_row.size.height, empty_row.size.height,
-        "typing into the blank line must not change its occupied row height"
+    assert!(
+        (f32::from(gap.size.height) - markion::DEFAULT_PARAGRAPH_SPACING as f32).abs() < 1.,
+        "a single separator occupies paragraph spacing, got {}",
+        f32::from(gap.size.height)
     );
-    assert_eq!(
-        following_after.top(),
-        following_before.top(),
-        "typing into the blank line must not move following content"
+    assert!(
+        following_after.top() > following_before.top() + px(8.),
+        "typing into a structural separator moves the following block down"
+    );
+    assert!(
+        paragraph_row.size.height > gap.size.height,
+        "the typed line is taller than the spacing-only separator"
     );
 }
 
@@ -10326,10 +10341,9 @@ fn visual_edit_typing_between_paragraphs_preserves_following_content_position(
             "visual-block-row-{tail_index}"
         )))
         .expect("tail heading should remain rendered");
-    assert_eq!(
-        tail_after.top(),
-        tail_before.top(),
-        "typing into a blank line between paragraphs must not move later blocks"
+    assert!(
+        tail_after.top() > tail_before.top(),
+        "typing into a structural separator between paragraphs moves later blocks down"
     );
 }
 
@@ -10372,9 +10386,9 @@ fn visual_edit_blank_line_tracks_custom_paragraph_spacing_without_input_jump(
     let following_after_spacing = cx
         .debug_bounds("visual-block-row-2")
         .expect("following heading should remain rendered after typography reflow");
-    assert_eq!(
-        gap_after_spacing.size.height, gap_before.size.height,
-        "paragraph spacing must remain outside the whitespace line box"
+    assert!(
+        gap_after_spacing.size.height > gap_before.size.height,
+        "a structural separator's height tracks paragraph spacing"
     );
     assert!(
         following_after_spacing.top() > following_before.top(),
@@ -10396,10 +10410,9 @@ fn visual_edit_blank_line_tracks_custom_paragraph_spacing_without_input_jump(
     let following_after_input = cx
         .debug_bounds("visual-block-row-2")
         .expect("following heading should remain rendered after input");
-    assert_eq!(
-        following_after_input.top(),
-        following_after_spacing.top(),
-        "custom paragraph spacing must not reintroduce the input-time jump"
+    assert!(
+        following_after_input.top() > following_after_spacing.top(),
+        "typing into a structural separator moves the following heading down"
     );
 }
 
@@ -10627,7 +10640,9 @@ fn visual_terminal_caret_matches_source_line(cx: &mut TestAppContext) {
 fn visual_terminal_blank_rows_keep_pointer_and_arrow_targets(cx: &mut TestAppContext) {
     for eol in ["\n", "\r\n"] {
         let source = format!("#{eol}  {eol}{eol}");
-        let targets = [1 + eol.len() + 2, 1 + 2 * eol.len() + 2, source.len()];
+        // Two authored blank lines. The caret at the document end shares the
+        // last newline instead of occupying a third painted row.
+        let targets = [1 + eol.len() + 2, 1 + 2 * eol.len() + 2];
         let (app, cx) = cx.add_window_view(|_, cx| {
             let mut app = MarkionApp::new(cx);
             app.tabs = vec![EditorTab::new(MarkdownDocument::from_text(&source))];
@@ -10874,8 +10889,10 @@ fn visual_edit_empty_list_item_is_not_a_source_island(cx: &mut TestAppContext) {
 #[gpui::test]
 fn visual_edit_tail_enter_moves_caret_down_the_whitespace_row(cx: &mut TestAppContext) {
     // Repeated Enter at the document tail must move the painted caret down
-    // the growing whitespace row. Painting it at the row origin made every
-    // extra blank line look like a no-op.
+    // once authored blank lines exist. The first Enter only finishes the
+    // paragraph, so the empty end row does not reserve a body line; the next
+    // Enter starts the first visible blank line at that same caret, and each
+    // further Enter walks down the row.
     let source = "Body";
     let (app, cx) = cx.add_window_view(|_, cx| {
         let mut app = MarkionApp::new(cx);
@@ -10916,10 +10933,20 @@ fn visual_edit_tail_enter_moves_caret_down_the_whitespace_row(cx: &mut TestAppCo
                 .expect("caret after tail Enter")
                 .top()
         });
-        assert!(
-            f32::from(top) > f32::from(previous_top) + 8.0,
-            "Enter #{press} must move the caret down: {previous_top:?} -> {top:?}"
-        );
+        // Enter #2 turns the empty end row into the first visible blank
+        // line, which starts where that caret already sat. Later Enters walk
+        // down additional body lines.
+        if press == 2 {
+            assert!(
+                f32::from(top) + 1.0 >= f32::from(previous_top),
+                "Enter #2 must not jump the caret upward: {previous_top:?} -> {top:?}"
+            );
+        } else {
+            assert!(
+                f32::from(top) > f32::from(previous_top) + 8.0,
+                "Enter #{press} must move the caret down: {previous_top:?} -> {top:?}"
+            );
+        }
         previous_top = top;
     }
 }
@@ -24146,11 +24173,20 @@ fn visual_list_blank_tail_caret_paints_at_left_margin(cx: &mut TestAppContext) {
                 (caret.left() - margin.left()).abs() < px(1.),
                 "blank line {line} caret {caret:?} is not at the left margin {margin:?}"
             );
-            assert!(
-                caret.top() > previous_top,
-                "blank line {line} caret {caret:?} did not move below the previous row"
-            );
-            previous_top = caret.top();
+            // The offset past the last newline is the document end. It shares
+            // that newline's body line instead of painting a phantom row.
+            if line == 4 {
+                assert!(
+                    (caret.top() - previous_top).abs() < px(1.),
+                    "document-end caret {caret:?} should share the last blank line at {previous_top:?}"
+                );
+            } else {
+                assert!(
+                    caret.top() > previous_top,
+                    "blank line {line} caret {caret:?} did not move below the previous row"
+                );
+                previous_top = caret.top();
+            }
         });
     }
 }
