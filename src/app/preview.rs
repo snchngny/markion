@@ -4178,11 +4178,6 @@ pub(super) fn whitespace_caret_line(
     newlines_before.min(max_line)
 }
 
-pub(super) fn whitespace_caret_y(line: usize, line_height: f32) -> f32 {
-    let max_line = WHITESPACE_ROW_MAX_LINES.saturating_sub(1);
-    line.min(max_line) as f32 * line_height
-}
-
 /// Source offset of painted line `line` inside a whitespace range. Line 0 is
 /// the first covered newline byte; later lines walk subsequent newlines. The
 /// result stays inside `[start, end)` before another block; at EOF the final

@@ -3607,14 +3607,10 @@ fn whitespace_row_height_respects_the_pathological_bound() {
 fn whitespace_caret_line_tracks_newlines_before_the_source_caret() {
     let text = "Hello\n\n\n";
     let range = 6..8;
-    let line_height = default_paragraph_line_height();
     assert_eq!(whitespace_caret_line(range.clone(), 6, text), 0);
     assert_eq!(whitespace_caret_line(range.clone(), 7, text), 1);
     // The caret at the document end shares the last newline's line.
     assert_eq!(whitespace_caret_line(range, 8, text), 1);
-    assert_eq!(whitespace_caret_y(0, line_height), 0.);
-    assert_eq!(whitespace_caret_y(1, line_height), line_height);
-    assert_eq!(whitespace_caret_y(2, line_height), 2. * line_height);
 }
 
 #[test]
