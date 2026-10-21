@@ -24496,7 +24496,14 @@ fn run_git(directory: &Path, arguments: &[&str]) -> String {
     let mut attempts = 0;
     let output = loop {
         attempts += 1;
-        let output = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            // The GUI-subsystem test harness has no console to inherit.
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let output = command
             .current_dir(directory)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env(
